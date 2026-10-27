@@ -4,6 +4,7 @@ import { Mic, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api, errMsg } from "@/lib/api";
@@ -23,15 +24,18 @@ export const RehearsalSetup = ({ script, startIdx, onStartIdx }) => {
   const [character, setCharacter] = useState(saved.character || "");
   const [instructions, setInstructions] = useState(saved.instructions ?? PRESETS[0].text);
   const [hideText, setHideText] = useState(saved.hideText ?? true);
+  const [hintSeconds, setHintSeconds] = useState(saved.hintSeconds ?? 5);
   const [busy, setBusy] = useState(false);
 
   const start = async () => {
     if (!character) return toast.error("Escolhe primeiro o teu papel.");
+    const hs = Number(hintSeconds);
+    if (!Number.isInteger(hs) || hs < 3 || hs > 15) return toast.error("O tempo até à dica tem de ser entre 3 e 15 segundos.");
     setBusy(true);
-    localStorage.setItem(prefsKey(script.id), JSON.stringify({ character, instructions, hideText }));
+    localStorage.setItem(prefsKey(script.id), JSON.stringify({ character, instructions, hideText, hintSeconds: hs }));
     try {
       const strictness = PRESETS.find((p) => p.text === instructions)?.id || "grave";
-      const s = await api.createSession({ script_id: script.id, character, instructions, strictness, start_idx: startIdx });
+      const s = await api.createSession({ script_id: script.id, character, instructions, strictness, start_idx: startIdx, hint_seconds: hs });
       nav(`/ensaio/${s.id}`);
     } catch (e) {
       toast.error(errMsg(e));
@@ -67,6 +71,16 @@ export const RehearsalSetup = ({ script, startIdx, onStartIdx }) => {
       <div className="flex items-center justify-between">
         <label htmlFor="hide" className="text-sm text-stone-300">Esconder o meu texto</label>
         <Switch id="hide" data-testid="hide-text-switch" checked={hideText} onCheckedChange={setHideText} />
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <label htmlFor="hint-seconds" className="text-sm text-stone-300">
+          Dica após silêncio <span className="text-stone-500 text-xs">(3–15 s)</span>
+        </label>
+        <div className="flex items-center gap-2">
+          <Input id="hint-seconds" data-testid="hint-seconds-input" type="number" min={3} max={15} step={1} value={hintSeconds}
+            onChange={(e) => setHintSeconds(e.target.value)} className="w-20 h-9 bg-[#0A0908] text-center" />
+          <span className="text-xs text-stone-500">s</span>
+        </div>
       </div>
       <div className="text-xs text-stone-500 flex items-center justify-between gap-2">
         <span>Começa em: <span className="text-stone-300">{startIdx === 0 ? "início" : `${startLine?.character || "rubrica"} — "${(startLine?.text || "").slice(0, 30)}…"`}</span></span>

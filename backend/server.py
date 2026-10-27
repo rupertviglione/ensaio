@@ -8,6 +8,7 @@ import asyncio
 import logging
 import tempfile
 import difflib
+import time
 import unicodedata
 from pathlib import Path
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field, BeforeValidator, ConfigDict  # noqa: E402
 from bson import ObjectId  # noqa: E402
 from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone  # noqa: E402
 from emergentintegrations.llm.openai import OpenAITextToSpeech, OpenAISpeechToText  # noqa: E402
+import eleven  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ensaio")
@@ -33,8 +35,6 @@ log = logging.getLogger("ensaio")
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 LLM_KEY = os.environ["EMERGENT_LLM_KEY"]
-ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-ELEVEN_MODEL = "eleven_flash_v2_5"
 LLM_MODEL = ("anthropic", "claude-sonnet-5-5")
 FAST_MODEL = ("anthropic", "claude-haiku-5-5")
 TTS_CACHE = ROOT_DIR / "tts_cache"
@@ -43,7 +43,7 @@ TTS_CACHE.mkdir(exist_ok=True)
 VOICES = ["onyx", "nova", "echo", "coral", "ash", "shimmer", "fable", "sage", "verse", "ballad", "alloy"]
 PROMPTER_VOICE = "sage"
 
-app = FastAPI()
+app = FastAPI(title="Ensaio API", openapi_url="/api/openapi.json", docs_url="/api/docs", redoc_url=None)
 api = APIRouter(prefix="/api")
 
 
@@ -136,6 +136,7 @@ class Session(BaseDocument):
     strictness: str = "grave"
     start_idx: int = 0
     focus_idxs: List[int] = []
+    hint_seconds: int = 5
     turns: List[Turn] = []
     status: str = "active"
     summary: Optional[dict] = None
@@ -339,6 +340,7 @@ class SessionIn(BaseModel):
     strictness: Literal["grave", "rigor", "nunca"] = "grave"
     start_idx: int = 0
     focus_idxs: List[int] = []
+    hint_seconds: int = Field(5, ge=3, le=15)
 
 
 class TurnIn(BaseModel):
@@ -571,6 +573,13 @@ def clean_for_tts(text: str) -> str:
 
 TTS_INFLIGHT: dict = {}
 TTS_SEM = asyncio.Semaphore(6)
+CATALOG: dict = {"voices": [], "prompter": None}
+PREMADE_IDS = {
+    "JBFqnCBsd6RMkjVDRZzb", "EXAVITQu4vr4xnSDxMaL", "XrExE9yKIg1WjnnlVkGX", "nPczCjzI2devNBz1zQrb", "FGY2WhTYpPnrIDTdsKH5",
+    "cjVigY5qzO86Huf0OWal", "XB0fDUnXU5powFXDhCwa", "iP95p4xoKVk53GoZ742B", "cgSgspJ2msm6clMCkdW9", "pqHfZKP75CvOlQylNhV4",
+    "pFZP5JQG7iQjIQuC4Bku", "TX3LPaxmHKxFdv7VOQHJ", "Xb7hH8MSUJpSbSDYk0k2", "N2lVS1w4EtoT3dr4eOWO", "SAz9YHcvj6GT2YYXdXww",
+    "onwK4e9ZLuTAKqWVaz9q",
+}
 
 
 def tts_instructions(character: Optional[str], style: str) -> str:
@@ -582,58 +591,81 @@ def tts_instructions(character: Optional[str], style: str) -> str:
     )
 
 
-async def _generate(text: str, voice: str, instructions: str) -> bytes:
+def hint_text(text: str) -> str:
+    return " ".join(clean_for_tts(text).split()[:3])
+
+
+async def _generate_openai(text: str, voice: str, instructions: str) -> bytes:
     engine = OpenAITextToSpeech(api_key=LLM_KEY)
-    async with TTS_SEM:
+
+    async def one(part: str) -> bytes:
         for attempt in range(2):
             try:
                 return await asyncio.wait_for(engine.generate_speech(
-                    text=text, model="gpt-4o-mini-tts", voice=voice, instructions=instructions), timeout=9)
+                    text=part, model="gpt-4o-mini-tts", voice=voice, instructions=instructions), timeout=45)
             except Exception as e:
-                log.warning("gpt-4o-mini-tts tentativa %s falhou: %s", attempt, e)
-        fallback = voice if voice not in ("ballad", "verse") else "alloy"
-        return await asyncio.wait_for(engine.generate_speech(text=text, model="tts-1", voice=fallback), timeout=20)
+                if attempt:
+                    raise
+                log.warning("gpt-4o-mini-tts falhou (%s), nova tentativa", e)
+
+    return b"".join(await asyncio.gather(*[one(p) for p in eleven.split_text(text, 1500)]))
 
 
-async def _generate_eleven(text: str, voice_id: str) -> bytes:
-    from elevenlabs import VoiceSettings
-    from elevenlabs.client import AsyncElevenLabs
-    client = AsyncElevenLabs(api_key=ELEVEN_KEY, timeout=20.0)
-    async with TTS_SEM:
-        out = b""
-        async for chunk in client.text_to_speech.convert(
-            voice_id=voice_id, text=text, model_id=ELEVEN_MODEL, language_code="pt", output_format="mp3_44100_64",
-            voice_settings=VoiceSettings(stability=0.45, similarity_boost=0.8, style=0.2, use_speaker_boost=True),
-        ):
-            out += chunk
-        return out
+def prompter_voice_id() -> Optional[str]:
+    return (CATALOG.get("prompter") or {}).get("id")
+
+
+def _fallback_reason(vid: Optional[str]) -> str:
+    if not eleven.KEY:
+        return "sem chave ElevenLabs"
+    if not vid:
+        return "personagem sem voz ElevenLabs"
+    return "chave ElevenLabs sem permissão TTS" if not eleven.can("tts") else ""
 
 
 async def synth(text: str, voice: str, character: Optional[str] = None, style: str = "",
-                el_voice_id: Optional[str] = None) -> bytes:
-    text = clean_for_tts(text)[:4000]
+                el_voice_id: Optional[str] = None) -> tuple:
+    text = clean_for_tts(text)
     if not text:
         raise HTTPException(400, "Texto vazio")
     voice = voice if voice in VOICES else PROMPTER_VOICE
-    use_el = bool(ELEVEN_KEY and el_voice_id)
+    el_voice_id = None if el_voice_id in PREMADE_IDS else el_voice_id
+    vid = el_voice_id or (prompter_voice_id() if character is None else None)
     instructions = tts_instructions(character, style)
-    sig = f"{text}|el|{el_voice_id}|{ELEVEN_MODEL}" if use_el else f"{text}|{voice}|gpt-4o-mini-tts|mp3|{instructions}"
-    key = hashlib.sha256(sig.encode()).hexdigest()
-    path = TTS_CACHE / f"{key}.mp3"
-    if path.exists():
-        return path.read_bytes()
+    el_key = hashlib.sha256(f"{text}|el|{vid}|{eleven.TTS_MODEL}".encode()).hexdigest()
+    oa_key = hashlib.sha256(f"{text}|{voice}|gpt-4o-mini-tts|mp3|{instructions}".encode()).hexdigest()
+    el_path, oa_path = TTS_CACHE / f"el_{el_key}.mp3", TTS_CACHE / f"oa_{oa_key}.mp3"
+    use_el = bool(vid) and eleven.can("tts")
+    if use_el and el_path.exists():
+        return el_path.read_bytes(), "elevenlabs", vid
+    if not use_el and oa_path.exists():
+        return oa_path.read_bytes(), "openai", voice
+    key = el_key if use_el else oa_key
     if key not in TTS_INFLIGHT:
         async def job():
             try:
-                audio = None
+                reason = _fallback_reason(vid)
                 if use_el:
-                    try:
-                        audio = await _generate_eleven(text, el_voice_id)
-                    except Exception as e:
-                        log.warning("ElevenLabs falhou (%s), a usar OpenAI", e)
-                audio = audio or await _generate(text, voice, instructions)
-                path.write_bytes(audio)
-                return audio
+                    for attempt in range(2):
+                        try:
+                            audio = await eleven.synth(text, vid)
+                            el_path.write_bytes(audio)
+                            eleven.STATS["elevenlabs"] += 1
+                            return audio, "elevenlabs", vid
+                        except Exception as e:
+                            reason = str(e)[:200]
+                            log.warning("ElevenLabs TTS tentativa %s falhou: %s", attempt + 1, reason)
+                            if isinstance(e, eleven.ElevenError) and e.status < 500:
+                                break
+                log.warning("TTS FALLBACK OpenAI (%s) voz=%s texto=%r", reason, voice, text[:60])
+                eleven.STATS["openai_fallback"] += 1
+                eleven.STATS["fallback_reasons"] = (eleven.STATS["fallback_reasons"] + [reason])[-20:]
+                if oa_path.exists():
+                    return oa_path.read_bytes(), "openai", voice
+                async with TTS_SEM:
+                    audio = await _generate_openai(text, voice, instructions)
+                oa_path.write_bytes(audio)
+                return audio, "openai", voice
             finally:
                 TTS_INFLIGHT.pop(key, None)
         TTS_INFLIGHT[key] = asyncio.ensure_future(job())
@@ -642,107 +674,100 @@ async def synth(text: str, voice: str, character: Optional[str] = None, style: s
 
 async def prepare_audio(script: Script, character: str, start_idx: int):
     voices = {c.name: c for c in script.characters}
-    todo = [ln for ln in script.lines[start_idx:] + script.lines[:start_idx]
-            if ln.kind == "dialogue" and ln.character != character]
-    await asyncio.gather(*[synth(effective_text(script, ln), voices[ln.character].voice, ln.character, voices[ln.character].style,
-                                 voices[ln.character].el_voice_id)
-                           for ln in todo], return_exceptions=True)
-
-
-ELEVEN_PREMADE = [
-    ("JBFqnCBsd6RMkjVDRZzb", "George", "male"), ("EXAVITQu4vr4xnSDxMaL", "Sarah", "female"),
-    ("XrExE9yKIg1WjnnlVkGX", "Matilda", "female"),
-    ("nPczCjzI2devNBz1zQrb", "Brian", "male"), ("FGY2WhTYpPnrIDTdsKH5", "Laura", "female"),
-    ("cjVigY5qzO86Huf0OWal", "Eric", "male"), ("XB0fDUnXU5powFXDhCwa", "Charlotte", "female"),
-    ("iP95p4xoKVk53GoZ742B", "Chris", "male"), ("cgSgspJ2msm6clMCkdW9", "Jessica", "female"),
-    ("pqHfZKP75CvOlQylNhV4", "Bill", "male"), ("pFZP5JQG7iQjIQuC4Bku", "Lily", "female"),
-    ("TX3LPaxmHKxFdv7VOQHJ", "Liam", "male"), ("Xb7hH8MSUJpSbSDYk0k2", "Alice", "female"),
-    ("N2lVS1w4EtoT3dr4eOWO", "Callum", "male"), ("SAz9YHcvj6GT2YYXdXww", "River", "neutral"),
-]
-PROMPTER_EL = "EXAVITQu4vr4xnSDxMaL"
-
-
-def premade_voices() -> list:
-    return [{"id": i, "name": n, "gender": g, "accent": "multilingue", "owned": True, "premade": True}
-            for i, n, g in ELEVEN_PREMADE]
+    order = script.lines[start_idx:] + script.lines[:start_idx]
+    ai = [ln for ln in order if ln.kind == "dialogue" and ln.character != character and ln.character in voices]
+    t0 = time.perf_counter()
+    res = await asyncio.gather(*[synth(effective_text(script, ln), voices[ln.character].voice, ln.character,
+                                       voices[ln.character].style, voices[ln.character].el_voice_id) for ln in ai],
+                               return_exceptions=True)
+    hints = {hint_text(effective_text(script, ln)) for ln in order if ln.kind == "dialogue" and ln.character == character}
+    await asyncio.gather(*[synth(h, PROMPTER_VOICE) for h in hints if h], return_exceptions=True)
+    fails = [r for r in res if isinstance(r, Exception)]
+    log.info("pré-geração: %s falas IA (%s falhas, %s ElevenLabs) + %s dicas em %.1fs", len(ai), len(fails),
+             sum(1 for r in res if isinstance(r, tuple) and r[1] == "elevenlabs"), len(hints), time.perf_counter() - t0)
 
 
 def guess_female(name: str) -> bool:
     first = name.strip().split()[0].lower() if name.strip() else ""
-    return first.endswith("a") or first in {"inês", "isabel", "raquel", "beatriz", "mãe", "avó", "rainha", "senhora", "dona"}
+    return first.endswith("a") or first in {"inês", "isabel", "raquel", "beatriz", "mãe", "avó", "rainha", "senhora", "dona", "mulher"}
 
 
-def assign_default_eleven(script: Script, voices: Optional[list] = None) -> bool:
-    if not ELEVEN_KEY:
-        return False
-    pool = [v for v in (voices or []) if not v.get("premade")]
+def assign_default_eleven(script: Script) -> bool:
+    pool = CATALOG["voices"]
     if not pool:
         return False
-    fem = [v for v in pool if v.get("gender") == "female"] or pool
-    mal = [v for v in pool if v.get("gender") != "female"] or pool
-    used, changed = {c.el_voice_id for c in script.characters if c.el_voice_id}, False
+    fem = [v for v in pool if v["gender"] == "female"]
+    mal = [v for v in pool if v["gender"] != "female"]
+    used, changed = {c.el_voice_id for c in script.characters if c.el_voice_id and c.el_voice_id not in PREMADE_IDS}, False
     for c in script.characters:
-        if c.el_voice_id:
+        if c.el_voice_id and c.el_voice_id not in PREMADE_IDS:
             continue
-        group = fem if guess_female(c.name) else mal
-        v = next((x for x in group if x["id"] not in used), group[len(used) % len(group)])
+        group = (fem if guess_female(c.name) else mal) or pool
+        other = mal if group is fem else fem
+        v = next((x for x in group + other if x["id"] not in used), group[len(used) % len(group)])
         c.el_voice_id, c.el_voice_name = v["id"], v["name"]
         used.add(v["id"])
         changed = True
     return changed
 
 
-async def eleven_pt_voices() -> list:
-    from elevenlabs.client import AsyncElevenLabs
-    client = AsyncElevenLabs(api_key=ELEVEN_KEY, timeout=20.0)
-    out, seen = [], set()
-    try:
-        mine = await client.voices.get_all()
-    except Exception as e:
-        log.warning("Sem permissão para listar vozes ElevenLabs (%s)", str(e)[-120:])
-        return []
-    for v in mine.voices:
-        labels = v.labels or {}
-        out.append({"id": v.voice_id, "name": v.name, "gender": labels.get("gender", ""),
-                    "accent": labels.get("accent", ""), "preview_url": v.preview_url, "owned": True})
-        seen.add(v.voice_id)
-    try:
-        res = await client.voices.get_shared(language="pt", page_size=100)
-    except Exception:
-        return out
-    for v in res.voices:
-        tag = f"{v.accent or ''} {v.locale or ''}".lower()
-        if not any(k in tag for k in ("pt-pt", "europ", "portug", "lisbo")) or "braz" in tag or "pt-br" in tag:
-            continue
-        out.append({"id": v.voice_id, "name": v.name, "gender": v.gender or "", "accent": v.accent or "",
-                    "preview_url": v.preview_url, "owned": False, "public_user_id": v.public_owner_id})
-    return out
+async def eleven_bootstrap(rebuild: bool = False):
+    doc = await db.voice_catalog.find_one({"_id": "pt-PT"})
+    if doc and doc.get("voices"):
+        CATALOG.update(voices=doc["voices"], prompter=doc.get("prompter"), source=doc.get("source", "api"))
+    st = await eleven.check_status(force=True)
+    seeded = CATALOG.get("source") == "seed"
+    if (rebuild or not CATALOG["voices"] or seeded) and (st["perms"].get("shared_voices") or (not CATALOG["voices"] and st["perms"].get("tts"))):
+        try:
+            cat = await eleven.build_catalog() if st["perms"].get("shared_voices") else eleven.seed_catalog()
+            if cat["voices"] and not (seeded and cat["source"] == "seed"):
+                CATALOG.update(voices=cat["voices"], prompter=cat["prompter"], source=cat["source"])
+                await db.voice_catalog.update_one({"_id": "pt-PT"}, {"$set": {**cat, "updated_at": now()}}, upsert=True)
+        except Exception as e:
+            log.exception("catálogo pt-PT falhou: %s", e)
+    n = 0
+    async for d in db.scripts.find({}):
+        s = Script.from_mongo(d)
+        if assign_default_eleven(s):
+            await save_characters(s)
+            n += 1
+    log.info("vozes: catálogo=%s, textos migrados=%s, avisos=%s", len(CATALOG["voices"]), n, eleven.messages())
 
 
-async def ensure_eleven_voice(v: dict) -> str:
-    if v.get("owned"):
-        return v["id"]
-    from elevenlabs.client import AsyncElevenLabs
-    client = AsyncElevenLabs(api_key=ELEVEN_KEY, timeout=20.0)
-    try:
-        r = await client.voices.share(v["public_user_id"], v["id"], new_name=f"Ensaio {v['name']}"[:40])
-        return r.voice_id
-    except Exception as e:
-        log.warning("não consegui adicionar a voz partilhada (%s); a usar id directo", e)
-        return v["id"]
+def voices_info() -> dict:
+    return {"provider": "elevenlabs" if CATALOG["voices"] and eleven.can("tts") else "openai", "openai": VOICES,
+            "elevenlabs": CATALOG["voices"], "prompter": CATALOG["prompter"], "pt_native": bool(CATALOG["voices"]),
+            "model": eleven.TTS_MODEL, "messages": eleven.messages()}
 
 
 @api.get("/voices")
 async def list_voices():
-    data = {"provider": "elevenlabs" if ELEVEN_KEY else "openai", "openai": VOICES, "elevenlabs": []}
-    if ELEVEN_KEY:
-        try:
-            data["elevenlabs"] = await eleven_pt_voices()
-            data["pt_native"] = bool(data["elevenlabs"])
-        except Exception as e:
-            log.exception("ElevenLabs voices: %s", e)
-            data["error"] = "Não consegui obter as vozes ElevenLabs. Verifica a chave."
-    return data
+    await eleven.check_status()
+    return voices_info()
+
+
+@api.get("/eleven/status")
+async def eleven_status(refresh: bool = False):
+    if refresh:
+        await eleven_bootstrap(rebuild=not CATALOG["voices"])
+    st = await eleven.check_status()
+    return {"configured": bool(eleven.KEY), "valid": st["valid"], "permissions": st["perms"], "errors": st["errors"],
+            "messages": eleven.messages(), "tts_model": eleven.TTS_MODEL, "realtime_model": eleven.REALTIME_MODEL,
+            "catalog": CATALOG["voices"], "prompter": CATALOG["prompter"], "stats": eleven.STATS}
+
+
+@api.post("/stt/token")
+async def stt_token():
+    if not eleven.KEY:
+        raise HTTPException(503, eleven.messages()[0])
+    try:
+        token = await eleven.realtime_token()
+    except eleven.ElevenError as e:
+        log.warning("token Scribe falhou: %s", e)
+        if e.is_auth:
+            eleven.STATUS["perms"]["realtime_token"] = False
+        raise HTTPException(503, eleven.perm_message("realtime_token"))
+    return {"token": token, "url": eleven.REALTIME_URL, "model_id": eleven.REALTIME_MODEL, "language_code": "pt", "sample_rate": 16000}
 
 
 class ElevenVoiceIn(BaseModel):
@@ -752,39 +777,33 @@ class ElevenVoiceIn(BaseModel):
 
 @api.post("/scripts/{script_id}/eleven-voice")
 async def set_eleven_voice(script_id: str, body: ElevenVoiceIn):
-    if not ELEVEN_KEY:
+    if not eleven.KEY:
         raise HTTPException(400, "ElevenLabs não está configurado.")
     script = await get_script(script_id)
-    vid = await ensure_eleven_voice(body.voice) if body.voice.get("id") else None
     for c in script.characters:
         if c.name == body.character:
-            c.el_voice_id, c.el_voice_name = vid, body.voice.get("name", "")
+            c.el_voice_id, c.el_voice_name = body.voice.get("id") or None, body.voice.get("name", "")
     await save_characters(script)
     return script_out(script)
 
 
 @api.post("/scripts/{script_id}/auto-voices")
 async def auto_eleven_voices(script_id: str):
-    if not ELEVEN_KEY:
-        raise HTTPException(400, "ElevenLabs não está configurado.")
+    if not CATALOG["voices"]:
+        raise HTTPException(404, (eleven.messages() or ["Sem vozes PT-PT disponíveis."])[0])
     script = await get_script(script_id)
-    voices = await eleven_pt_voices()
-    if not voices:
-        raise HTTPException(404, "Sem acesso às vozes PT-PT da biblioteca ElevenLabs: a chave precisa da permissão Voices: Read.")
     for c in script.characters:
         c.el_voice_id = None
-    assign_default_eleven(script, voices)
-    for c in script.characters:
-        v = next(x for x in voices if x["id"] == c.el_voice_id)
-        c.el_voice_id = await ensure_eleven_voice(v)
+    assign_default_eleven(script)
     await save_characters(script)
     return script_out(script)
 
 
 @api.post("/tts")
 async def tts(body: TTSIn):
-    audio = await synth(body.text, body.voice, body.character, body.style, body.el_voice_id)
-    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
+    audio, provider, voice = await synth(body.text, body.voice, body.character, body.style, body.el_voice_id)
+    return Response(content=audio, media_type="audio/mpeg", headers={
+        "Cache-Control": "public, max-age=86400", "X-TTS-Provider": provider, "X-TTS-Voice": voice or ""})
 
 
 STT_PROMPT = "Português de Portugal. Transcreve exactamente o que é dito, palavra a palavra."
@@ -1022,40 +1041,6 @@ async def session_voice_turn(session_id: str, line_idx: int = Form(...), file: U
     return {"said": said, **res}
 
 
-def is_complete(expected: str, said: str) -> bool:
-    exp, got = norm_tokens(expected), norm_tokens(said)
-    if not got:
-        return False
-    if NEEDS_AI.search(" ".join(got)):
-        return True
-    tail = exp[-min(3, len(exp)):]
-    window = got[-(len(tail) + 2):]
-    hits, j = 0, 0
-    for t in tail:
-        for k in range(j, len(window)):
-            if difflib.SequenceMatcher(a=t, b=window[k]).ratio() >= 0.75:
-                hits, j = hits + 1, k + 1
-                break
-    end_ok = hits >= max(1, round(len(tail) * 0.67))
-    return end_ok and len(got) >= max(1, int(len(exp) * 0.6))
-
-
-@api.post("/sessions/{session_id}/probe")
-async def session_probe(session_id: str, line_idx: int = Form(...), final: bool = Form(False), file: UploadFile = File(...)):
-    session = await get_session(session_id)
-    script = await get_script(session.script_id)
-    if line_idx < 0 or line_idx >= len(script.lines):
-        raise HTTPException(400, "Fala inválida")
-    data = await file.read()
-    said = await transcribe(data, (file.filename or "a.webm").rsplit(".", 1)[-1].lower())
-    if not said:
-        return {"complete": final, "said": "", "turn": None, "advance": False, "memory_note": None}
-    if not final and not is_complete(effective_text(script, script.lines[line_idx]), said):
-        return {"complete": False, "said": said}
-    res = await evaluate_turn(session, script, line_idx, said, "voz")
-    return {"complete": True, "said": said, **res}
-
-
 SUMMARY_SYSTEM = """És um treinador de texto experiente para actores. Falas português de Portugal (PT-PT).
 Recebes as falas que o actor ensaiou (texto esperado vs. o que disse, em cada tentativa), as instruções e a memória do texto (alterações acordadas que substituem o original).
 Faz um resumo detalhado da prestação. É OBRIGATÓRIO listar TUDO o que foi diferente do texto fornecido (cada omissão, troca, acrescento, repetição, salto), mesmo pequenas coisas, ignorando apenas pontuação, erros evidentes de transcrição automática e formas coloquiais/contraídas equivalentes (prá/para, tá/está, tou/estou, etc.), que a transcrição normaliza e NÃO são erros.
@@ -1130,18 +1115,14 @@ JOÃO: Prometo. Afinal, alguém tem de ficar à espera."""
 
 @app.on_event("startup")
 async def seed():
-    premade = {i for i, _, _ in ELEVEN_PREMADE} | {"onwK4e9ZLuTAKqWVaz9q"}
-    async for d in db.scripts.find({"characters.el_voice_id": {"$in": list(premade)}}):
-        chars = [{**c, "el_voice_id": None, "el_voice_name": ""} if c.get("el_voice_id") in premade else c for c in d["characters"]]
-        await db.scripts.update_one({"_id": d["_id"]}, {"$set": {"characters": chars}})
     async for d in db.scripts.find({"lines.uid": {"$exists": False}, "lines.0": {"$exists": True}}):
         lines = [{**ln, "uid": short_id()} for ln in d["lines"]]
         await db.scripts.update_one({"_id": d["_id"]}, {"$set": {"lines": lines}})
     if await db.scripts.count_documents({}) == 0:
         lines, chars = await build_structure(DEMO_TEXT)
         s = Script(title="A Espera", author="Cena de demonstração", raw_text=DEMO_TEXT, lines=lines, characters=chars)
-        assign_default_eleven(s)
         await db.scripts.insert_one(s.to_mongo())
+    asyncio.create_task(eleven_bootstrap())
 
 
 app.include_router(api)
@@ -1151,6 +1132,7 @@ app.add_middleware(
     allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-TTS-Provider", "X-TTS-Voice"],
 )
 
 

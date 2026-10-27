@@ -89,7 +89,7 @@ export const CharactersPanel = ({ script, onSaved }) => {
   const [info, setInfo] = useState(null);
   const [auto, setAuto] = useState(false);
   useEffect(() => { api.voices().then(setInfo).catch(() => setInfo({ provider: "openai" })); }, []);
-  const eleven = info?.provider === "elevenlabs" ? info.elevenlabs : null;
+  const eleven = info?.provider === "elevenlabs" || info?.pt_native ? info.elevenlabs : info?.messages?.length ? [] : null;
 
   const update = async (c) => {
     const characters = script.characters.map((x) => (x.name === c.name ? c : x));
@@ -120,8 +120,13 @@ export const CharactersPanel = ({ script, onSaved }) => {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-stone-400 max-w-xl" data-testid="voice-provider-info">
-          {eleven ? (info.pt_native ? "Vozes OpenAI em português de Portugal, ou vozes ElevenLabs nativas de Portugal (escolhe por personagem)." : "Vozes OpenAI em português de Portugal. As vozes ElevenLabs de Portugal só ficam disponíveis com a permissão Voices: Read na chave; até lá podes colar o Voice ID de uma voz PT-PT.") : "Vozes OpenAI em português de Portugal."}
+          {info.pt_native
+            ? "Vozes ElevenLabs nativas de Portugal (português europeu), uma por personagem. A voz OpenAI só é usada se a ElevenLabs falhar."
+            : "Vozes OpenAI em português de Portugal (motor anterior). Podes colar o Voice ID de uma voz ElevenLabs PT-PT."}
         </p>
+        {info.messages?.length > 0 && (
+          <p data-testid="eleven-permission-warning" className="w-full text-xs text-amber-300/90">{info.messages.join(" · ")}</p>
+        )}
         {eleven && info.pt_native && (
           <Button data-testid="auto-voices-btn" variant="outline" size="sm" onClick={autoAssign} disabled={auto} className="rounded-full">
             {auto ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Wand2 className="w-4 h-4 mr-2" />} Atribuir automaticamente

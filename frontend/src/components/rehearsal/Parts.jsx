@@ -38,6 +38,20 @@ const SEV = {
   none: "border-emerald-500/50 bg-emerald-500/[0.05]",
 };
 
+export const HintBox = ({ text }) => (
+  <div data-testid="hint-display" className="rise rounded-full border border-sky-400/40 bg-sky-500/[0.07] px-5 py-2 text-sky-200 font-serif text-lg">
+    <span className="font-mono text-[10px] tracking-[0.3em] text-sky-400 mr-3">DICA</span>{text}…
+  </div>
+);
+
+const ENGINE = { scribe: "Escuta em tempo real · ElevenLabs Scribe", webspeech: "Escuta do browser (motor anterior)", none: "Sem reconhecimento de voz" };
+
+export const EngineBadge = ({ engine, hintSeconds }) => (
+  <p data-testid="stt-engine-badge" className="mt-1 text-[10px] font-mono tracking-widest text-stone-500 uppercase">
+    {engine ? ENGINE[engine] : "Microfone fechado"} · dica após {hintSeconds}s de silêncio
+  </p>
+);
+
 export const FeedbackBox = ({ turn, said }) => (
   <div data-testid="feedback-box" className={`rise w-full rounded-2xl border-l-2 px-6 py-5 ${SEV[turn.severity] || SEV.none}`}>
     {said && (

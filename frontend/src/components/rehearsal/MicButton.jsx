@@ -3,13 +3,14 @@ import { Mic, Square, Loader2, RotateCcw } from "lucide-react";
 const STATUS = {
   ready: "Pronto para começar",
   ai: "A contracena…",
-  listening: "A ouvir-te…",
+  listening: "A ouvir-te… (toca para \"Terminei\")",
   processing: "A verificar…",
   speaking: "O apontador está a falar",
   waiting: "Carrega para dizeres a fala",
   interrupted: "Repete ou continua",
   paused: "Em pausa",
   finishing: "A preparar o resumo…",
+  opening: "A abrir o microfone…",
 };
 
 const Wave = () => (
@@ -22,7 +23,7 @@ const Wave = () => (
 
 export const MicButton = ({ phase, level, onClick }) => {
   const listening = phase === "listening";
-  const busy = phase === "processing" || phase === "finishing";
+  const busy = phase === "processing" || phase === "finishing" || phase === "opening";
   const scale = listening ? 1 + Math.min(level * 8, 0.35) : 1;
   return (
     <div className="flex flex-col items-center gap-5">

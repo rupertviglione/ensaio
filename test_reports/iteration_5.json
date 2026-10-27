@@ -1,0 +1,36 @@
+{
+  "summary": "Round 5 tests of the ElevenLabs pt-PT voices and Scribe realtime work, on backend and frontend. Backend: the new suite test_ensaio_round5.py passes 20/20. Regression suites test_ensaio_api, round2 and round3 also pass (4 skips were already there). (1) Docs: /api/openapi.json and /api/docs return 200. (2) /eleven/status: valid=true; tts, stt and realtime_token are true and voices_read is false; the Voices: Read message is present. The catalog has 9 voices (4 female, 5 male) and the prompter is Joana nJ5NFqyKb8kn9JBPmo6i. No sk_ key appears in the response. (3) /stt/token returns a sutkn_ token, the wss URL, scribe_v2_realtime, pt and 16000, and no key. (4) /voices returns provider elevenlabs, pt_native true and the catalog. (5) Demo characters: JOÃO→Diogo, MARTA→Marta, CHEFE→Vasco; the IDs are distinct and none are Brazilian premade IDs. (6) hint_seconds: 2 and 16 return 422, 10 is stored, and the default is 5. (7) Pre-generation log shows 'pré-geração: 8 falas IA (0 falhas, 8 ElevenLabs) + 6 dicas'. After it, a cached AI-line /tts returns elevenlabs with the right X-TTS-Voice in about 0.1s round-trip. (8) Prompter /tts uses elevenlabs with Joana. (9) Long text: 2,200 characters gave 2.34 MB, 10.5x the short text, from elevenlabs with a single voice. A fresh 1,551-character text took 23.6s and gave 1.75 MB. split_text unit checks lose no text. (10) invalidVoiceId000000 → openai, and the log shows 'TTS FALLBACK OpenAI (404 voice_not_found…)' after one attempt (a 4xx is not retried, by design). (11) /probe returns 404. /turn: the correct line advances in grave, rigor and nunca; rigor WITH the rigor preset instructions interrupts on the ir→partir swap; nunca never interrupts. (12) Regression: create script, PUT characters, memory direct edit, finish summary and txt extract all work. Frontend (all pass): (a) hint-seconds-input defaults to 5; 2 and 16 show the toast 'O tempo até à dica tem de ser entre 3 e 15 segundos.' with no navigation and no POST; 10 navigates and the POST has hint_seconds 10; the badge reads 'MICROFONE FECHADO · DICA APÓS 10S DE SILÊNCIO'. (b) Vozes tab: the voice-provider-info text, the eleven-permission-warning, active labels Diogo/Marta/Vasco, the select lists 9 catalog voices, and preview returns elevenlabs bBNhdwrIjl4fcVYiRbT2. (c) Rehearsal: the headless browser HAS a fake mic, so the Scribe engine connected (badge 'ESCUTA EM TEMPO REAL · ELEVENLABS SCRIBE'). Text entry still works in that mode: the exact line advances, a wrong line in rigor shows feedback-box with the LLM message plus repeat/continue, repeating with the correct text advances, and Terminar shows the summary at 88%. All TTS requests were elevenlabs with the correct per-character and Joana IDs. (d) Hints with hint_seconds=3 in mic mode: hint-display appeared about 2.5s into my turn ('Perdi-o. Ou melhor,…'), then moved on to the next 3 words ('deixei-o ir. Fiquei…'). The turn did NOT end on silence after more than 10s. Terminei with nothing heard shows the toast 'Não ouvi nada…'. (e) With getUserMedia forced to reject: the toast 'Sem acesso ao microfone. Podes continuar por escrito.' appears, the toggle shows 'Só escrita', and text mode advances correctly. No hint is shown in text mode. (f) Library and Novo texto with a .txt upload fill the textarea, save works, and the new characters get catalog voices automatically (ANA→Marta, RUI→Diogo). No JS page errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "eleven.split_text", "issue": "When a sentence has no spaces or commas, the chunk is limit+1 characters (2401 > MAX_CHARS 2400) because sent[:cut+1] is used with cut=limit. Harmless in practice."},
+      {"endpoint": "POST /api/sessions/{id}/turn (rigor)", "issue": "When strictness is 'rigor' but the instructions are empty or custom, a single word swap (ir→partir) is judged 'minor' and NOT interrupted. TURN_SYSTEM says 'Sem instruções: só erros graves' and ignores session.strictness. With the rigor preset text it interrupts correctly. This behaviour was already there before this round."},
+      {"endpoint": "POST /api/tts", "issue": "A character with a premade or old el_voice_id gets silently routed to OpenAI. This is intended, but the fallback log entry is counted in STATS.openai_fallback."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Script > Vozes", "issues": ["The ElevenLabs voice select trigger cuts the label off ('Marta · fem. · European Portug…'). Consider a shorter label (e.g. 'Marta · fem.') or a wider select."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_round5.py", "/app/test_reports/pytest/round5.xml"],
+  "action_items": [
+    "Optional: pass session.strictness into the TURN_SYSTEM prompt so 'rigor' interrupts word swaps even without the preset instructions",
+    "Optional: fix the split_text off-by-one for chunks with no spaces",
+    "Optional: shorten the ElevenLabs voice select label in CharactersPanel"
+  ],
+  "critical_code_review_comments": [
+    "server.py has 1141 lines. Split it into modules (voice/tts, sessions/evaluation, scripts parsing).",
+    "In synth(), when ElevenLabs fails, the OpenAI audio is cached under oa_key but the inflight key stays el_key. The next identical request retries ElevenLabs twice before returning the cached OpenAI audio, which adds latency for a voice that keeps failing. Consider remembering per-voice failures, e.g. a negative cache.",
+    "prepare_audio fires all AI lines at once through eleven.synth. EL_SEM=3 limits them, but with long scripts (100+ lines) a session start queues every line, and the user's live /tts requests wait behind them. Consider prioritising the first N lines or a separate live semaphore.",
+    "ScribeEngine logged one '[scribe] ligação fechada 1006' during the headless run. The reconnect logic exists, and the UI was not affected."
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_round5.py (new)", "/app/backend/tests/test_ensaio_round4.py (module-level skip: obsolete because /probe and is_complete were removed and voices are now auto-assigned)"],
+  "success_rate": {"backend": "100% (20/20 new; regression api/round2/round3 all pass)", "frontend": "100%"},
+  "seed_data_creation": "No new seed data. Temporary scripts TEST_R5 / TEST_R5 UI were deleted. Several test sessions were created on the demo 'A Espera' (they show in the Ensaios tab).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The demo 'A Espera' ID changed (now 6ae0e6fb9bca756b96db7745); round5 tests look it up by title. pytest.ini adds '-n ... --dist loadscope'; run with '-n 0' to stay sequential (the ElevenLabs plan allows 3 concurrent requests). The headless Playwright browser HAS a fake microphone, so Scribe connects. To test the no-mic path, add an init script that makes navigator.mediaDevices.getUserMedia reject (use a new context). Use hint_seconds=3 to see hint-display quickly. test_ensaio_round4.py is skipped as obsolete. The pre-generation test reads /var/log/supervisor/backend.err.log."
+}

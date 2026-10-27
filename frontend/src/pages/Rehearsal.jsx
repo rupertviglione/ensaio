@@ -1,15 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Pause, Play, SkipBack, SkipForward, Lightbulb, Flag, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
+import { Pause, Play, SkipBack, SkipForward, Lightbulb, Flag, Mic, MicOff, Volume2, VolumeX, Check } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { api, errMsg } from "@/lib/api";
-import { playUrl, stopAudio, Recorder, startRecognition } from "@/lib/audio";
-import { isComplete } from "@/lib/match";
+import { playUrl, stopAudio } from "@/lib/audio";
+import { isComplete, localVerdict, normTokens, HELP_RE, NOTE_RE } from "@/lib/match";
+import { TranscriptBuffer, alignPos, cleanForTts, splitWords } from "@/lib/transcript";
+import { Listener } from "@/lib/listener";
 import { ScriptView } from "@/components/script/ScriptView";
 import { loadPrefs } from "@/components/script/RehearsalSetup";
 import { MicButton } from "@/components/rehearsal/MicButton";
-import { TextEntry, FeedbackBox } from "@/components/rehearsal/Parts";
+import { TextEntry, FeedbackBox, HintBox, EngineBadge } from "@/components/rehearsal/Parts";
+
+const lat = (entry) => {
+  window.__ensaioLatency = [...(window.__ensaioLatency || []), entry];
+  console.info("[ensaio:latência]", entry);
+};
+
+const stripHelp = (text, expected) => {
+  if ((normTokens(expected).join(" ").match(HELP_RE) || []).length) return text;
+  return text.replace(/\b(texto|linha)\b[!?.,]*/gi, "").replace(/n[aã]o me lembro[!?.,]*/gi, "").replace(/\s+/g, " ").trim();
+};
 
 export default function Rehearsal() {
   const { sessionId } = useParams();
@@ -25,12 +37,19 @@ export default function Rehearsal() {
   const [voiceOn, setVoiceOn] = useState(true);
   const [hideText, setHideText] = useState(true);
   const [live, setLive] = useState("");
+  const [hint, setHint] = useState(null);
+  const [engine, setEngine] = useState(null);
+  const [notice, setNotice] = useState("");
   const [prompterVoice, setPrompterVoice] = useState(() => localStorage.getItem("ensaio-prompter-voice") !== "off");
   const run = useRef(0);
-  const srRef = useRef(null);
-  const rec = useRef(null);
+  const listener = useRef(null);
+  const tb = useRef(new TranscriptBuffer());
+  const turn = useRef(null);
   const cache = useRef(new Map());
   const idxRef = useRef(0);
+  const pendingLat = useRef(null);
+  const checkRef = useRef(() => {});
+  const tickRef = useRef(() => {});
 
   useEffect(() => {
     api.getSession(sessionId).then(async (s) => {
@@ -44,11 +63,12 @@ export default function Rehearsal() {
       setIdx(resume);
       idxRef.current = resume;
     }).catch(() => nav("/"));
+    api.elevenStatus().then((st) => st.messages?.length && setNotice(st.messages.join(" · "))).catch(() => {});
     return () => {
       run.current++;
       stopAudio();
-      srRef.current?.stop();
-      rec.current?.destroy();
+      if (turn.current) clearInterval(turn.current.timer);
+      listener.current?.close();
     };
   }, [sessionId, nav]);
 
@@ -56,29 +76,42 @@ export default function Rehearsal() {
   const mine = session?.character;
   const plan = session?.focus_idxs?.length ? buildPlan(lines, session.focus_idxs, mine) : null;
   const nextOf = (i) => (plan ? plan.find((p) => p > i) ?? lines.length : i + 1);
-
+  const hintMs = (session?.hint_seconds || 5) * 1000;
   const goIdx = (i) => { idxRef.current = i; setIdx(i); };
 
-  const getAudio = useCallback((l) => {
+  const getAudio = (l) => {
     if (!cache.current.has(l.idx)) {
       const c = script.characters.find((x) => x.name === l.character);
       cache.current.set(l.idx, api.tts({ text: lineText(l), voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id }).catch(() => null));
     }
     return cache.current.get(l.idx);
-  }, [script]);
+  };
+  const getPrompter = (text) => {
+    const k = `p:${text}`;
+    if (!cache.current.has(k)) cache.current.set(k, api.tts({ text }).catch(() => null));
+    return cache.current.get(k);
+  };
 
   const prefetch = (from) => {
     let n = 0;
     for (let i = from; i < lines.length && n < 6; i = nextOf(i)) {
       const l = lines[i];
-      if (l.kind === "dialogue" && l.character !== mine) { getAudio(l); n++; }
+      if (l.kind !== "dialogue") continue;
+      if (l.character !== mine) getAudio(l);
+      else if (prompterVoice) getPrompter(splitWords(cleanForTts(lineText(l))).slice(0, 3).join(" "));
+      n++;
     }
+  };
+
+  const stopTurn = () => {
+    if (turn.current) { clearInterval(turn.current.timer); turn.current.done = true; }
+    turn.current = null;
   };
 
   const finish = async () => {
     run.current++;
     stopAudio();
-    rec.current?.cancel(); srRef.current?.stop();
+    stopTurn();
     setPhase("finishing");
     try {
       await api.finish(sessionId);
@@ -91,7 +124,7 @@ export default function Rehearsal() {
 
   const speak = async (text, token) => {
     setPhase("speaking");
-    const url = await api.tts({ text }).catch(() => null);
+    const url = await getPrompter(text);
     if (url && token === run.current) await playUrl(url);
   };
 
@@ -122,102 +155,167 @@ export default function Rehearsal() {
     }
   };
 
-  const listen = async (i, token) => {
+  // Single completion path: content match (instant, local) or "Terminei" / note → server.
+  const endTurn = (reason) => {
+    const t = turn.current;
+    if (!t || t.done) return;
+    const said = stripHelp(tb.current.turnWords().join(" "), t.expected);
+    const endAt = performance.now();
+    const lastWordAt = tb.current.lastWordAt();
+    stopTurn();
+    listener.current?.commit();
+    setHint(null);
+    setLastSaid(said);
+    if (!said) { toast("Não ouvi nada. Carrega no microfone para tentares outra vez."); return setPhase("waiting"); }
+    const sev = reason === "match" ? localVerdict({ expected: t.expected, said, strictness: session.strictness, memory: script.memory }) : null;
+    if (!sev) return submit(t.i, said, "voz", t.token);
+    setFeedback(null);
+    pendingLat.current = { line: t.i, endAt, lastWordAt };
+    api.turn(sessionId, { line_idx: t.i, said, mode: "voz" }).then((r) => {
+      if (r.memory_note) toast.success("Guardado na memória do texto", { description: r.memory_note.text });
+      if (t.token !== run.current) return;
+      if (r.advance) { if (r.turn.severity === "major") setFeedback(r.turn); return; }
+      const token = ++run.current;
+      stopAudio();
+      stopTurn();
+      goIdx(t.i);
+      handleResult(t.i, r, token);
+    }).catch((e) => console.warn("[ensaio] verificação falhou", errMsg(e)));
+    runFrom(nextOf(t.i), t.token);
+  };
+
+  const nextHint = (t) => {
+    const pos = alignPos(t.words, tb.current.turnWords());
+    const start = Math.max(pos, t.hintEnd);
+    return { start, text: t.words.slice(start, start + 3).join(" ") };
+  };
+
+  const giveHint = async (t) => {
+    const h = nextHint(t);
+    t.since = performance.now();
+    if (!h.text) return;
+    t.hintEnd = h.start + 3;
+    t.hinting = true;
+    t.prefetched = false;
+    setHint(h.text);
+    if (prompterVoice) {
+      const url = await getPrompter(h.text);
+      if (url && turn.current === t) {
+        tb.current.echoStart(h.text);
+        await playUrl(url);
+        tb.current.echoEnd(400);
+      }
+    }
+    t.hinting = false;
+    t.since = performance.now();
+  };
+
+  checkRef.current = () => {
+    const t = turn.current;
+    if (!t || t.done) return;
+    const text = tb.current.turnWords().join(" ");
+    setLive(text);
+    const norm = normTokens(text).join(" ");
+    const helps = (norm.match(HELP_RE) || []).length;
+    if (helps > t.helps && !(normTokens(t.expected).join(" ").match(HELP_RE) || []).length) { t.helps = helps; giveHint(t); }
+    t.note = NOTE_RE.test(norm);
+    if (isComplete(t.expected, stripHelp(text, t.expected))) endTurn("match");
+  };
+
+  tickRef.current = () => {
+    const t = turn.current;
+    if (!t || t.done || t.hinting) return;
+    const silent = performance.now() - Math.max(tb.current.lastChange, t.since);
+    if (t.note && silent > 2500) return endTurn("note");
+    if (prompterVoice && !t.prefetched && silent > hintMs - 1500) { t.prefetched = true; getPrompter(nextHint(t).text); }
+    if (silent >= hintMs) giveHint(t);
+  };
+
+  const listen = (i, token, fresh = true) => {
     setPhase("listening");
     setReveal(false);
-    setLive("");
+    setHint(null);
     prefetch(nextOf(i));
-    if (!voiceOn || !rec.current) return;
-    let done = false;
-    let inflight = false;
-    let again = false;
+    if (!voiceOn || !listener.current) { setLive(""); return; }
+    if (fresh) tb.current.reset();
     const expected = lineText(lines[i]);
-    srRef.current?.stop();
-    srRef.current = startRecognition((t) => {
-      if (done || token !== run.current) return;
-      setLive(t);
-      if (!isComplete(expected, t)) return;
-      done = true;
-      rec.current?.cancel(); srRef.current?.stop();
-      srRef.current?.stop();
-      setLastSaid(t);
-      api.turn(sessionId, { line_idx: i, said: t, mode: "voz" })
-        .then((r) => token === run.current && handleResult(i, r, token))
-        .catch((e) => { if (token === run.current) { toast.error(errMsg(e)); setPhase("waiting"); } });
-    });
-    const probe = async (final) => {
-      if (done || (inflight && !final)) { again = !final; return; }
-      inflight = true;
-      try {
-        const blob = await rec.current.snapshot();
-        const r = await api.probe(sessionId, i, blob, final);
-        if (token !== run.current || done) return;
-        if (r.said) { setLive(r.said); setLastSaid(r.said); }
-        if (!r.complete) return;
-        done = true;
-        srRef.current?.stop();
-        rec.current.cancel();
-        if (!r.turn) { toast("Não percebi o que disseste. Tenta outra vez."); setPhase("waiting"); return; }
-        await handleResult(i, r, token);
-      } catch (e) {
-        if (final && token === run.current) { toast.error(errMsg(e)); setPhase("waiting"); }
-      } finally {
-        inflight = false;
-        if (again && !done && !final) { again = false; probe(false); }
-      }
-    };
-    const blob = await rec.current.record({ onPause: () => probe(false), onLevel: (v) => setLevel((p) => (Math.abs(p - v) > 0.004 ? v : p)) });
-    if (token !== run.current || done) return;
-    srRef.current?.stop();
-    if (!blob) { setPhase("waiting"); return; }
-    setPhase("processing");
-    probe(true);
+    stopTurn();
+    const t = { i, token, expected, words: splitWords(cleanForTts(expected)), hintEnd: 0, helps: 0, since: performance.now(), done: false };
+    t.timer = setInterval(() => tickRef.current(), 200);
+    turn.current = t;
+    setLive("");
+    checkRef.current();
   };
 
   const runFrom = async (start, existing) => {
     const token = existing ?? ++run.current;
+    stopTurn();
     let i = start;
     while (i < lines.length) {
       if (token !== run.current) return;
       const l = lines[i];
       goIdx(i);
       if (l.kind !== "dialogue") { i = nextOf(i); continue; }
-      if (l.character === mine) return listen(i, token);
+      if (l.character === mine) return listen(i, token, false);
       setPhase("ai");
+      setHint(null);
       prefetch(nextOf(i));
       const url = await getAudio(l);
       if (token !== run.current) return;
-      if (url) await playUrl(url);
+      tb.current.reset();
+      tb.current.echoStart(lineText(l), 2500);
+      if (url) {
+        await playUrl(url, () => {
+          const p = pendingLat.current;
+          if (!p) return;
+          pendingLat.current = null;
+          const now = performance.now();
+          lat({ type: "actorEnd→aiStart", line: i, ms_match_to_audio: Math.round(now - p.endAt), ms_lastword_to_audio: Math.round(now - p.lastWordAt) });
+        });
+      }
+      tb.current.echoEnd(500);
+      const lc = listener.current;
+      if (lc) lat({ type: "aiEnd→micReady", line: i, engine: lc.kind, ms_since_last_chunk: Math.round(performance.now() - lc.lastChunkAt), capturing: performance.now() - lc.lastChunkAt < 250 });
       i = nextOf(i);
     }
     if (token === run.current) finish();
   };
 
-  const begin = async () => {
-    if (voiceOn && !rec.current) {
-      try {
-        const r = new Recorder();
-        await r.init();
-        rec.current = r;
-      } catch {
-        toast.error("Sem acesso ao microfone. Podes continuar por escrito.");
-        setVoiceOn(false);
-      }
+  const openMic = async () => {
+    if (!voiceOn || listener.current) return listener.current?.setActive(true);
+    setPhase("opening");
+    const l = new Listener({
+      onText: (text) => { if (tb.current.update(text)) checkRef.current(); },
+      onLevel: (v) => setLevel((p) => (Math.abs(p - v) > 0.004 ? v : p)),
+      onNotice: (msg) => { setNotice(msg); toast.warning(msg); },
+      onEngine: setEngine,
+    });
+    try {
+      await l.open();
+      listener.current = l;
+    } catch {
+      l.close();
+      toast.error("Sem acesso ao microfone. Podes continuar por escrito.");
+      setVoiceOn(false);
     }
+  };
+
+  const begin = async () => {
+    await openMic();
     prefetch(idxRef.current);
     runFrom(idxRef.current);
   };
 
-  const pause = () => { run.current++; stopAudio(); rec.current?.cancel(); srRef.current?.stop(); setPhase("paused"); };
+  const pause = () => { run.current++; stopAudio(); stopTurn(); listener.current?.setActive(false); setPhase("paused"); };
 
   const onMic = () => {
     if (phase === "ready" || phase === "paused") return begin();
-    if (phase === "listening") return rec.current?.stop();
+    if (phase === "listening") return endTurn("manual");
     if (phase === "waiting" || phase === "interrupted") return listen(idxRef.current, ++run.current);
   };
 
   const onText = (t) => {
-    rec.current?.cancel(); srRef.current?.stop();
+    stopTurn();
     stopAudio();
     submit(idxRef.current, t, "escrito", ++run.current);
   };
@@ -233,7 +331,7 @@ export default function Rehearsal() {
       i = Math.max(0, Math.min(lines.length - 1, i));
     }
     stopAudio();
-    rec.current?.cancel(); srRef.current?.stop();
+    stopTurn();
     setFeedback(null);
     goIdx(i);
     if (phase === "ready" || phase === "paused") { run.current++; return; }
@@ -254,11 +352,13 @@ export default function Rehearsal() {
             <p className="font-mono text-[11px] tracking-[0.3em] text-amber-500">SALA DE ENSAIO</p>
             <h1 className="font-serif text-2xl md:text-3xl font-semibold mt-1">{script.title} <span className="text-stone-500 font-normal">— {mine}</span></h1>
             {plan && <p data-testid="focus-mode-badge" className="mt-1 text-xs font-mono tracking-widest text-rose-300">ZONAS A REVER · {session.focus_idxs.length} FALAS (COM A DEIXA)</p>}
+            <EngineBadge engine={engine} hintSeconds={session.hint_seconds || 5} />
           </div>
           <Button data-testid="finish-rehearsal-btn" onClick={finish} disabled={phase === "finishing"} variant="outline" className="rounded-full border-rose-500/40 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200">
             <Flag className="w-4 h-4 mr-2" /> Terminar
           </Button>
         </div>
+        {notice && <p data-testid="eleven-permission-warning" className="w-full text-xs text-amber-300/90 border border-amber-500/20 rounded-lg px-3 py-2">{notice}</p>}
 
         <div className="w-full flex-1 flex flex-col items-center justify-center gap-8 py-6">
           {cur && (
@@ -273,6 +373,12 @@ export default function Rehearsal() {
             </div>
           )}
           <MicButton phase={phase} level={level} onClick={onMic} />
+          {phase === "listening" && voiceOn && (
+            <Button data-testid="done-speaking-btn" onClick={() => endTurn("manual")} variant="outline" className="rounded-full border-amber-500/40 text-amber-300 hover:bg-amber-500/10">
+              <Check className="w-4 h-4 mr-2" /> Terminei
+            </Button>
+          )}
+          {hint && phase === "listening" && <HintBox text={hint} />}
           {phase === "listening" && live && (
             <p data-testid="live-transcript" className="text-sm italic text-stone-400 max-w-xl text-center">"{live}"</p>
           )}

@@ -7,6 +7,8 @@ import wave
 import pytest
 import requests
 
+pytestmark = pytest.mark.skip(reason="Obsolete since round 5: /probe removed, server.is_complete removed, pt-PT ElevenLabs catalog auto-assigned (see test_ensaio_round5.py)")
+
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
 API = f"{BASE_URL}/api"
 sys.path.insert(0, "/app/backend")

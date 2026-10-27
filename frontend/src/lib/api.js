@@ -3,7 +3,11 @@ import axios from "axios";
 export const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 export const http = axios.create({ baseURL: API });
 
-export const errMsg = (e) => e?.response?.data?.detail || e?.message || "Ocorreu um erro";
+export const errMsg = (e) => {
+  const d = e?.response?.data?.detail;
+  if (Array.isArray(d)) return d.map((x) => x.msg).join("; ");
+  return d || e?.message || "Ocorreu um erro";
+};
 
 export const api = {
   listScripts: () => http.get("/scripts").then((r) => r.data),
@@ -38,13 +42,8 @@ export const api = {
     return http.post(`/sessions/${id}/voice-turn`, fd).then((r) => r.data);
   },
   voices: () => http.get("/voices").then((r) => r.data),
-  probe: (id, lineIdx, blob, final) => {
-    const fd = new FormData();
-    fd.append("line_idx", String(lineIdx));
-    fd.append("final", final ? "true" : "false");
-    fd.append("file", blob, `fala.${blob.type.includes("mp4") ? "mp4" : "webm"}`);
-    return http.post(`/sessions/${id}/probe`, fd).then((r) => r.data);
-  },
+  elevenStatus: () => http.get("/eleven/status").then((r) => r.data),
+  sttToken: () => http.post("/stt/token").then((r) => r.data),
   setElevenVoice: (id, character, voice) => http.post(`/scripts/${id}/eleven-voice`, { character, voice }).then((r) => r.data),
   autoVoices: (id) => http.post(`/scripts/${id}/auto-voices`).then((r) => r.data),
   tts: (body) =>

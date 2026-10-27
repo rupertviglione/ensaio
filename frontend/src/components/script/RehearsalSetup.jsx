@@ -10,8 +10,8 @@ import { api, errMsg } from "@/lib/api";
 
 const PRESETS = [
   { id: "grave", label: "Só erros graves", text: "Interrompe apenas se houver algum erro grave ou um salto grande. Deixa passar pequenas trocas, enganos e repetições." },
-  { id: "rigor", label: "Rigoroso", text: "Modo rigoroso: interrompe sempre que eu não disser a fala palavra por palavra." },
-  { id: "fim", label: "Nunca interromper", text: "Nunca me interrompas. Deixa tudo para o resumo final." },
+  { id: "rigor", label: "Rigoroso", text: "Modo rigoroso: interrompe quando eu trocar, saltar ou acrescentar palavras. Ignora pronúncia, formas coloquiais (prá, tá…) e pequenas falhas de reconhecimento." },
+  { id: "nunca", label: "Nunca interromper", text: "Nunca me interrompas. Deixa tudo para o resumo final." },
 ];
 
 export const prefsKey = (id) => `ensaio-prefs-${id}`;
@@ -30,7 +30,8 @@ export const RehearsalSetup = ({ script, startIdx, onStartIdx }) => {
     setBusy(true);
     localStorage.setItem(prefsKey(script.id), JSON.stringify({ character, instructions, hideText }));
     try {
-      const s = await api.createSession({ script_id: script.id, character, instructions, start_idx: startIdx });
+      const strictness = PRESETS.find((p) => p.text === instructions)?.id || "grave";
+      const s = await api.createSession({ script_id: script.id, character, instructions, strictness, start_idx: startIdx });
       nav(`/ensaio/${s.id}`);
     } catch (e) {
       toast.error(errMsg(e));

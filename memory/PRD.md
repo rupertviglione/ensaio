@@ -18,6 +18,13 @@ App para treinar e decorar texto (actores, utilizador único). Carregar texto (c
 - Resumo: pontuação, síntese, estatísticas, todas as diferenças, zonas a rever, dicas, pontos fortes
 - README com instruções locais
 
+## Round 2 (2026-10-27) — fluidez e vozes
+- Verificação local instantânea (difflib + normalização coloquial prá/para, tá/está, números; tolerância fuzzy); IA (claude-haiku-5-5) só em casos duvidosos, negações, notas/pedidos ou linhas com alterações na memória
+- Níveis: grave / rigor / nunca (strictness na sessão); rigor ignora pronúncia e coloquialismos
+- /voice-turn: STT (Whisper com a fala esperada como pista) + avaliação numa só chamada; silêncio 0,9 s
+- ElevenLabs eleven_flash_v2_5 (~0,3 s) com fallback OpenAI; pré-geração de todo o áudio ao criar a sessão; dedupe/cache; timeouts no gpt-4o-mini-tts
+- A chave ElevenLabs não tem a permissão voices_read → usa as vozes pré-definidas (multilingue); Voice ID manual possível
+
 ## Backlog
 - P1: aplicar notas da memória visualmente no guião (texto alterado em linha)
 - P1: editar manualmente falas/personagens após o parse

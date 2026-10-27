@@ -22,3 +22,6 @@ IA com a chave universal Emergent: voz (TTS e STT) e modelo de texto (Claude Son
 
 ## Edge Cases
 Para já convém que funcione num ambiente local com alguma facilidade, para eu conseguir experimentar e ir aprofundando a coisa. Primeiro testo aqui online e depois descarrego. Quero ficar com os ficheiros para download, com tudo funcional (incluindo instruções simples para correr localmente).
+
+## Round 2 (feedback do utilizador, verbatim)
+Ora tem algumas falhas já detectadas. Tem que ser muito mais fluido. Em textos por exemplo em que se fala mal "tipo, prá em vez de para" etc ele tende a reconhecer o que quer que digas como a palavra correcta e depois quer corrigir, mas não distingue quando dizes bem. Também me pareceu ouvir mal, talvez seja o modo rigoroso que está tão rigoroso que até coisas que não são erros são tidos como erros, mas não pode estar sempre sempre a parar. as vozes são muito pouco naturais... A openAi não funcionaria? Não sei... Qualquer coisa mais natural dava jeito. Acima de tudo o tempo entre a fala da IA e o do utilizador tem que ser muito menor. O tempo a avaliar a fala tem que ser muito menor. Bater texto tem que ser uma coisa rápida e ágil se cada merdinha demora imenso, não dá.

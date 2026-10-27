@@ -29,6 +29,15 @@ export const api = {
     fd.append("file", blob, `fala.${ext}`);
     return http.post("/stt", fd).then((r) => r.data.text);
   },
+  voiceTurn: (id, lineIdx, blob) => {
+    const fd = new FormData();
+    fd.append("line_idx", String(lineIdx));
+    fd.append("file", blob, `fala.${blob.type.includes("mp4") ? "mp4" : "webm"}`);
+    return http.post(`/sessions/${id}/voice-turn`, fd).then((r) => r.data);
+  },
+  voices: () => http.get("/voices").then((r) => r.data),
+  setElevenVoice: (id, character, voice) => http.post(`/scripts/${id}/eleven-voice`, { character, voice }).then((r) => r.data),
+  autoVoices: (id) => http.post(`/scripts/${id}/auto-voices`).then((r) => r.data),
   tts: (body) =>
     http.post("/tts", body, { responseType: "blob" }).then((r) => URL.createObjectURL(r.data)),
 };

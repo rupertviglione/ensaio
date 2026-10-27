@@ -1,0 +1,44 @@
+{
+  "summary": "Ronda 2 testada no backend e no frontend. Backend: nova suite test_ensaio_round2.py com 21 de 22 testes a passar, e a regressão test_ensaio_api.py com 18 de 18. O emparelhamento local é muito rápido: 70 a 100 ms de ida e volta pelo URL público. As formas coloquiais contam como certas nos dois sentidos (prá/para, tá/está, tou/estou, tás/estás, pró/para o, 10/dez, 2/dois) e a pontuação é ignorada. Com 'nunca' a fala avança sempre, sem interromper. Pelo caminho da IA (claude-haiku), uma palavra trocada no modo rigoroso interrompe com feedback em cerca de 1,9 s, um erro grave no modo grave interrompe em cerca de 2,3 s, 'texto!' dá a deixa e a nota fica guardada na memória sem avançar. O voice-turn com áudio real (TTS ElevenLabs enviado ao endpoint) transcreve e avança em cerca de 1 s; áudio silencioso devolve turn=null e um line_idx inválido devolve 400. O TTS ElevenLabs demora entre 0,28 e 0,34 s, o fallback para OpenAI funciona e o apontador também responde. GET /voices devolve o provider elevenlabs com 16 vozes pré-definidas. O auto-voices dá voz feminina a ANA e masculina a PEDRO, o eleven-voice grava a voz escolhida e a criação de sessão atribui vozes em falta. Frontend: no separador Vozes funcionam a escolha ElevenLabs, o Voice ID manual com 'Usar', a atribuição automática com toast e a pré-visualização (200 audio/mpeg). A preparação envia strictness='rigor' a partir do preset. Na sala em modo só escrita, a fala correcta avança em 0,27 s; a fala errada mostra a feedback-box em cerca de 2,9 s, e os botões repetir/continuar aparecem enquanto o apontador fala. Repetir limpa a caixa e a fala correcta avança. Terminar leva ao resumo (75%). Regressão: biblioteca, novo texto e adicionar nota funcionam; não houve erros de JS.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/sessions/{id}/turn (strictness='nunca')", "issue": "Com 'nunca', o fast_verdict devolve sempre (True, ...) e a IA nunca é chamada. Por isso, 'texto!' ou 'aí mudámos nos ensaios, agora digo X' passam a contar como uma fala com precisão 0, o ensaio avança, não se dá a deixa nem se guarda a nota. Reproduzido com 'texto!' na sessão MARTA/nunca: kind='line', advance=true. Correcção sugerida: antes do caminho rápido, se a precisão for baixa (por exemplo abaixo de 50) ou o texto parecer pedido de ajuda ou nota (texto!, linha, deixa, mudámos, agora digo, em vez de), enviar para a IA também no modo 'nunca' (que continua a não interromper)."},
+      {"endpoint": "fast_verdict 'grave'", "issue": "Com o limiar de 72% de precisão, 'Hoje não é dia de pedra.' para 'Hoje é dia de pedra.' é aceite como minor sem chamar a IA. Uma negação que inverte o sentido nunca interrompe, embora o modo grave devesse apanhar 'sentido alterado'. Pode valer a pena enviar para a IA as diferenças que incluam 'não', 'nunca' ou 'nada'."},
+      {"endpoint": "local_match fuzzy", "issue": "No modo rigor, as palavras com ratio >= 0.75 contam como iguais: 'ficas' contra 'fica' e 'sábia' contra 'sábio' passam como 100% ou correctas. É tolerável para erros de transcrição, mas mudanças reais de pessoa ou género não são assinaladas no rigor."},
+      {"endpoint": "local_match / memória", "issue": "O caminho rápido ignora a memória do texto. Se uma nota diz 'agora digo X em vez de Y' e o actor diz o original Y, o rápido aceita. Uma alteração acordada com várias palavras vai sempre à IA (cerca de 2 s) em cada ensaio."},
+      {"endpoint": "POST /api/sessions", "issue": "O campo strictness não é validado: 'xyz' é aceite e gravado, e o comportamento passa a ser o de 'grave'. Usar Literal['grave','rigor','nunca']."},
+      {"endpoint": "assign_default_eleven / PROMPTER_EL", "issue": "A primeira voz feminina atribuída (Sarah, EXAVITQu4vr4xnSDxMaL) é a mesma do apontador. No demo, MARTA tem a voz Sarah: quando o actor faz de JOÃO, a personagem MARTA e o feedback do apontador soam iguais. Excluir PROMPTER_EL do conjunto de vozes das personagens."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CharactersPanel", "issue": "Enquanto o /api/voices carrega, aparece por um instante o texto 'Vozes OpenAI em português de Portugal.' e os selects OpenAI, até mudar para ElevenLabs.", "selector": "[data-testid='voice-provider-info']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Vozes", "issues": ["O placeholder do campo Voice ID ('ou cola um Voice ID da biblioteca') fica cortado em 'ou cola um Voice ID da' na coluna de 260px; usar um placeholder mais curto, por exemplo 'Voice ID'."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_round2.py", "/app/backend/tests/test_ensaio_api.py", "/app/test_reports/pytest/pytest_round2.xml", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Modo 'nunca': continuar a detectar pedidos de ajuda ('texto!') e notas de memória (enviar à IA quando a precisão for baixa ou houver padrões de nota/ajuda) sem interromper",
+    "Validar strictness com Literal['grave','rigor','nunca']",
+    "Excluir a voz do apontador (PROMPTER_EL) da atribuição automática das personagens",
+    "Opcional: no modo grave, enviar à IA as diferenças que incluam negações; aplicar a memória no caminho rápido; placeholder do Voice ID mais curto; não mostrar os selects OpenAI enquanto as vozes carregam"
+  ],
+  "critical_code_review_comments": [
+    "server.py tem 950 linhas, acima do limite de 700. Separar em módulos: parsing, voz (tts/stt/eleven), matching, sessões e prompts.",
+    "prepare_audio usa voices[ln.character]: se uma personagem não estiver em script.characters, o KeyError rebenta dentro da task em background e o erro não é registado. Usar .get com fallback.",
+    "Em auto_eleven_voices, next(x for x in voices if x['id'] == c.el_voice_id) não tem valor por omissão (é seguro hoje, mas frágil).",
+    "O tts_cache continua a crescer sem limite e a chave das vozes ElevenLabs não inclui as voice_settings (se mudarem, o cache fica obsoleto)."
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_round2.py"],
+  "success_rate": {"backend": "97.5% (39/40: 21/22 round2 + 18/18 regressão)", "frontend": "100% dos fluxos pedidos (problemas cosméticos menores)"},
+  "test_credentials": "Nenhuma; a app não tem autenticação (/app/memory/test_credentials.md não existe)",
+  "seed_data_creation": "Os scripts TEST_R2 e TEST_UI R2 foram apagados e a nota de teste no demo também. Ficam no demo 'A Espera' sessões novas, MARTA/JOÃO/CHEFE, várias em curso, incluindo uma com strictness 'xyz'. O auto-voices do demo deixou JOÃO=George, MARTA=Sarah e CHEFE=Daniel.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Demo id 6ae0b13a66c133cb3e5c88b4. O script 'Rua Gagarin' (6ae0b2bb18b7b9aa94dd6007) parece ser do utilizador: não lhe mexer. O texto de rehearsal-status aparece em maiúsculas no inner_text ('A OUVIR-TE…', 'O APONTADOR ESTÁ A FALAR', 'A CONTRACENA…'). Usar voice-toggle-btn antes de play-btn. Correr o pytest com -n 0 para ver os tempos impressos. O voice-turn pode ser testado com áudio real: gerar com POST /api/tts e enviar como a.mp3.",
+  "rca of the issue": "Modo 'nunca': em fast_verdict(), o ramo strictness=='nunca' devolve sempre um veredicto e nunca None, por isso evaluate_turn nunca chega ao classificador da IA (note/help). Para reproduzir: POST /api/sessions com strictness 'nunca' e depois /turn com said='texto!'; devolve kind=line e advance=true. Mitigação: só aceitar localmente no 'nunca' quando acc>=50 e sem padrões de ajuda/nota; caso contrário chamar a IA e forçar interrupt=false (o código já força isto para 'nunca')."
+}

@@ -54,14 +54,14 @@ export default function Rehearsal() {
   const getAudio = useCallback((l) => {
     if (!cache.current.has(l.idx)) {
       const c = script.characters.find((x) => x.name === l.character);
-      cache.current.set(l.idx, api.tts({ text: l.text, voice: c.voice, character: c.name, style: c.style }).catch(() => null));
+      cache.current.set(l.idx, api.tts({ text: l.text, voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id }).catch(() => null));
     }
     return cache.current.get(l.idx);
   }, [script]);
 
   const prefetch = (from) => {
     let n = 0;
-    for (let i = from; i < lines.length && n < 3; i++) {
+    for (let i = from; i < lines.length && n < 6; i++) {
       const l = lines[i];
       if (l.kind === "dialogue" && l.character !== mine) { getAudio(l); n++; }
     }
@@ -87,15 +87,19 @@ export default function Rehearsal() {
     if (url && token === run.current) await playUrl(url);
   };
 
-  const submit = async (i, said, mode, token) => {
+  const submit = async (i, said, mode, token, blob) => {
     setPhase("processing");
-    setLastSaid(said);
+    if (said) setLastSaid(said);
     try {
-      const r = await api.turn(sessionId, { line_idx: i, said, mode });
+      const r = blob ? await api.voiceTurn(sessionId, i, blob) : await api.turn(sessionId, { line_idx: i, said, mode });
       if (token !== run.current) return;
+      if (blob) {
+        if (!r.turn) { toast("Não percebi o que disseste. Tenta outra vez."); setPhase("waiting"); return; }
+        setLastSaid(r.said);
+      }
       if (r.memory_note) toast.success("Guardado na memória do texto", { description: r.memory_note.text });
       if (r.advance) {
-        setFeedback(r.turn.severity === "none" ? null : r.turn);
+        setFeedback(r.turn.severity === "major" ? r.turn : null);
         return runFrom(i + 1, token);
       }
       setFeedback(r.turn);
@@ -115,19 +119,10 @@ export default function Rehearsal() {
     setReveal(false);
     prefetch(i + 1);
     if (!voiceOn || !rec.current) return;
-    const blob = await rec.current.record({ onLevel: (v) => setLevel((p) => (Math.abs(p - v) > 0.004 ? v : p)) });
+    const blob = await rec.current.record({ silenceMs: 900, onLevel: (v) => setLevel((p) => (Math.abs(p - v) > 0.004 ? v : p)) });
     if (token !== run.current) return;
     if (!blob) { setPhase("waiting"); return; }
-    setPhase("processing");
-    try {
-      const text = await api.stt(blob);
-      if (token !== run.current) return;
-      if (!text) { toast("Não percebi o que disseste. Tenta outra vez."); setPhase("waiting"); return; }
-      submit(i, text, "voz", token);
-    } catch (e) {
-      toast.error(errMsg(e));
-      setPhase("waiting");
-    }
+    submit(i, "", "voz", token, blob);
   };
 
   const runFrom = async (start, existing) => {
@@ -160,6 +155,7 @@ export default function Rehearsal() {
         setVoiceOn(false);
       }
     }
+    prefetch(idxRef.current);
     runFrom(idxRef.current);
   };
 

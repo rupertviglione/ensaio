@@ -18,7 +18,9 @@ MONGO_URL="mongodb://localhost:27017"
 DB_NAME="ensaio"
 CORS_ORIGINS="*"
 EMERGENT_LLM_KEY=a-tua-chave-universal-emergent
+ELEVENLABS_API_KEY=a-tua-chave-elevenlabs
 ```
+`ELEVENLABS_API_KEY` é opcional (obtém em https://elevenlabs.io/app/settings/api-keys). Com ela, as personagens usam vozes ElevenLabs (mais naturais e rápidas); sem ela, usa-se a OpenAI. Para poderes escolher vozes PT-PT da biblioteca na app, dá à chave a permissão **Voices → Read** (e **Write** para as adicionar automaticamente); sem essa permissão podes colar um Voice ID em "Vozes". Nunca coloques chaves no frontend.
 Arranca:
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8001 --reload

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { Loader2, BookmarkPlus, RotateCcw, Check } from "lucide-react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { Loader2, BookmarkPlus, RotateCcw, Check, Target } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { api, errMsg, fmtDate } from "@/lib/api";
@@ -19,12 +19,22 @@ const Stat = ({ label, value }) => (
   </div>
 );
 
-const DiffRow = ({ d, scriptId, i }) => {
+const applyEdit = (line, d) => {
+  if (!line || !d.expected) return null;
+  const base = line.edited_text || line.text;
+  const pos = base.toLowerCase().indexOf(d.expected.toLowerCase());
+  return pos < 0 ? null : base.slice(0, pos) + (d.said || "") + base.slice(pos + d.expected.length);
+};
+
+const DiffRow = ({ d, script, i, onSaved }) => {
   const [saved, setSaved] = useState(false);
   const save = async () => {
     try {
-      await api.addMemory(scriptId, `Alteração acordada: em vez de "${d.expected}", o actor diz "${d.said}".`);
+      const newText = applyEdit(script.lines[d.line_idx], d);
+      await api.addMemory(script.id, `Alteração acordada: em vez de "${d.expected}", o actor diz "${d.said}".`,
+        { line_idx: d.line_idx ?? null, new_text: newText ? newText.replace(/\s+/g, " ").trim() : null });
       setSaved(true);
+      onSaved();
       toast.success("Guardado como alteração acordada");
     } catch (e) {
       toast.error(errMsg(e));
@@ -48,6 +58,7 @@ const DiffRow = ({ d, scriptId, i }) => {
 
 export default function Summary() {
   const { sessionId } = useParams();
+  const nav = useNavigate();
   const [session, setSession] = useState(null);
   const [script, setScript] = useState(null);
   const [error, setError] = useState("");
@@ -75,7 +86,21 @@ export default function Summary() {
 
   const sm = session.summary || {};
   const st = sm.stats || {};
-  const lineText = (i) => script.lines[i]?.text;
+  const lineText = (i) => script.lines[i]?.edited_text || script.lines[i]?.text;
+  const focusIdxs = [...new Set([...(sm.zones_to_review || []), ...(sm.differences || [])]
+    .map((z) => z.line_idx)
+    .filter((i) => Number.isInteger(i) && script.lines[i]?.character === session.character))].sort((a, b) => a - b);
+  const rehearseZones = async () => {
+    try {
+      const s = await api.createSession({
+        script_id: script.id, character: session.character, instructions: session.instructions,
+        strictness: session.strictness || "grave", start_idx: focusIdxs[0], focus_idxs: focusIdxs,
+      });
+      nav(`/ensaio/${s.id}`);
+    } catch (e) {
+      toast.error(errMsg(e));
+    }
+  };
 
   return (
     <div className="max-w-6xl mx-auto px-6 md:px-10 py-14 space-y-8">
@@ -85,9 +110,16 @@ export default function Summary() {
           <h1 className="font-serif text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight">{script.title}</h1>
           <p className="text-stone-400 mt-2">Papel: <span className="text-stone-200">{session.character}</span></p>
         </div>
-        <Button asChild className="rounded-full h-11 px-6" data-testid="rehearse-again-btn">
-          <Link to={`/texto/${script.id}`}><RotateCcw className="w-4 h-4 mr-2" /> Ensaiar outra vez</Link>
-        </Button>
+        <div className="flex flex-wrap gap-3">
+          {focusIdxs.length > 0 && (
+            <Button data-testid="rehearse-zones-btn" onClick={rehearseZones} variant="outline" className="rounded-full h-11 px-6 border-rose-500/40 text-rose-200 hover:bg-rose-500/10">
+              <Target className="w-4 h-4 mr-2" /> Ensaiar zonas a rever ({focusIdxs.length})
+            </Button>
+          )}
+          <Button asChild className="rounded-full h-11 px-6" data-testid="rehearse-again-btn">
+            <Link to={`/texto/${script.id}`}><RotateCcw className="w-4 h-4 mr-2" /> Ensaiar outra vez</Link>
+          </Button>
+        </div>
       </div>
 
       <div className="grid md:grid-cols-[280px_1fr] gap-8">
@@ -108,7 +140,7 @@ export default function Summary() {
 
       <Block title={`TUDO O QUE FOI DIFERENTE DO TEXTO (${sm.differences?.length || 0})`} testid="summary-differences">
         {sm.differences?.length ? (
-          <ul>{sm.differences.map((d, i) => <DiffRow key={i} d={d} i={i} scriptId={script.id} />)}</ul>
+          <ul>{sm.differences.map((d, i) => <DiffRow key={i} d={d} i={i} script={script} onSaved={() => api.getScript(script.id).then(setScript)} />)}</ul>
         ) : <p className="text-stone-400">Nenhuma diferença. Texto dito tal e qual.</p>}
       </Block>
 

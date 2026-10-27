@@ -16,6 +16,27 @@ export function playUrl(url) {
   });
 }
 
+export const hasLiveRecognition = () => !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+export function startRecognition(onText) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  const r = new SR();
+  r.lang = "pt-PT";
+  r.continuous = true;
+  r.interimResults = true;
+  let stopped = false;
+  r.onresult = (e) => {
+    let t = "";
+    for (let i = 0; i < e.results.length; i++) t += `${e.results[i][0].transcript} `;
+    onText(t.trim());
+  };
+  r.onerror = () => {};
+  r.onend = () => { if (!stopped) try { r.start(); } catch { /* já activo */ } };
+  try { r.start(); } catch { return null; }
+  return { stop: () => { stopped = true; try { r.abort(); } catch { /* ignorar */ } } };
+}
+
 export class Recorder {
   async init() {
     this.stream = await navigator.mediaDevices.getUserMedia({
@@ -29,7 +50,7 @@ export class Recorder {
     src.connect(this.analyser);
   }
 
-  record({ onLevel, silenceMs = 1600, noSpeechMs = 15000, maxMs = 120000, threshold = 0.018 } = {}) {
+  record({ onLevel, onPause, pauseMs = 450, silenceMs = 3200, noSpeechMs = 15000, maxMs = 120000, threshold = 0.018 } = {}) {
     return new Promise((resolve) => {
       const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "audio/mp4";
       const mr = new MediaRecorder(this.stream, { mimeType: mime });
@@ -38,9 +59,20 @@ export class Recorder {
       const start = performance.now();
       let spoke = false;
       let lastVoice = start;
+      let paused = true;
       let raf;
       let mode = "auto";
-      mr.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      let snapWaiters = [];
+      this._blob = () => new Blob(chunks, { type: mime });
+      this.snapshot = () => {
+        if (mr.state === "inactive") return Promise.resolve(this._blob());
+        return new Promise((res) => { snapWaiters.push(res); mr.requestData(); });
+      };
+      mr.ondataavailable = (e) => {
+        if (e.data.size) chunks.push(e.data);
+        snapWaiters.forEach((w) => w(this._blob()));
+        snapWaiters = [];
+      };
       mr.onstop = () => {
         cancelAnimationFrame(raf);
         onLevel?.(0);
@@ -61,6 +93,10 @@ export class Recorder {
         if (rms > threshold) {
           spoke = true;
           lastVoice = t;
+          paused = false;
+        } else if (spoke && !paused && t - lastVoice > pauseMs) {
+          paused = true;
+          onPause?.();
         }
         if ((spoke && t - lastVoice > silenceMs) || t - start > maxMs || (!spoke && t - start > noSpeechMs)) {
           this._stop("auto");

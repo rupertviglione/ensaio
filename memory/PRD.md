@@ -25,6 +25,13 @@ App para treinar e decorar texto (actores, utilizador único). Carregar texto (c
 - ElevenLabs eleven_flash_v2_5 (~0,3 s) com fallback OpenAI; pré-geração de todo o áudio ao criar a sessão; dedupe/cache; timeouts no gpt-4o-mini-tts
 - A chave ElevenLabs não tem a permissão voices_read → usa as vozes pré-definidas (multilingue); Voice ID manual possível
 
+## Round 4 (2026-10-27) — fluidez real e vozes PT-PT
+- Vozes: OpenAI gpt-4o-mini-tts por defeito (personagens e apontador); vozes ElevenLabs pré-definidas (sotaque BR) removidas; ElevenLabs só com Voice ID manual ou vozes nativas PT-PT (requer permissão voices_read)
+- STT: sem a fala esperada no prompt (causava loops/alucinações); corrida gpt-4o-mini-transcribe vs whisper-1 (primeiro a responder)
+- Endpointing por conteúdo: reconhecimento ao vivo no browser (Web Speech pt-PT) + sondas Whisper a cada pausa (450 ms) via /sessions/{id}/probe; a fala só termina quando o fim da fala é reconhecido (ou 3,2 s de silêncio / clique); transcrição ao vivo
+- Apontador com voz opcional (toggle)
+- Correcções da iteração 3 (rename no-op, deixa com texto alterado, blur imediato, reload no resumo, aviso no editor)
+
 ## Backlog
 - P1: aplicar notas da memória visualmente no guião (texto alterado em linha)
 - P1: editar manualmente falas/personagens após o parse

@@ -1,0 +1,41 @@
+{
+  "summary": "Round 3 tested on backend and frontend using temporary TEST_R3 scripts (deleted afterwards; demo untouched). Backend: new suite test_ensaio_round3.py passes 12/13. Regression test_ensaio_api.py + round2 pass 40/40 after updating one outdated timing assertion. (1) GET /voices returns provider elevenlabs, pt_native=false and the premade voices without Daniel; voice-provider-info explains that native voices need the Voices: Read permission. (2) Memory with line_idx+new_text applies directly; AI linking (~1-2s API, ~3.9s in the UI including reload) links the MARTA note to the right line. Lines carry edited_text/edit_note_id. A non-edit note stays unlinked. Deleting a note restores the line (API + UI). Saying the edited text in a turn is accepted fast (<1.5s) with expected=edited text. In rehearsal the edited text and the ALTERAÇÃO ACORDADA badge show. Guião shows ALTERADO with the struck-through original. (3) Summary rehearse-zones-btn sends focus_idxs [4,6] with start_idx 4 and shows focus-mode-badge. The script panel shows only cue+focus lines 3-6, the stage plays only the cues, answers jump to the next focus line, and after the last one it goes to the summary (100%). The diff button 'É alteração acordada' sends line_idx+new_text and the script shows the change. (4) ScriptEditor: text edit, '+ nova personagem…' (prompt), RUBRICA, insert, delete, add-line and save all work; characters are recomputed and the new character gets an ElevenLabs voice. PUT /lines keeps voices for existing characters, prunes memory of deleted lines, drops empty lines and returns 400 without dialogue. Rename via prompt works (MARTA -> MARTA SILVA) and renaming to an existing name merges (RUI -> joão). Regression text-mode rehearsal -> finish -> summary passes. No JS page errors.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/scripts/{id}/rename-character", "issue": "Renaming a character to its own name (any case, e.g. old='ANA', new='ana') DELETES the character. After the upper() call new == old, so the merge branch filters it out. The script is left with lines and no characters, and sessions then fail. Reproduced: characters became []. The UI prompt guards against this but the API does not. Fix: if new == body.old, return as-is (no-op)."},
+      {"endpoint": "rename-character / update_lines", "issue": "Existing sessions keep the old character name. 'Ensaiar zonas a rever' from an old summary of a renamed or removed character returns 400 'Personagem inválida'."},
+      {"endpoint": "evaluate_turn prompt", "issue": "The 'Deixa anterior' sent to the AI uses prev.text instead of effective_text(script, prev), so the cue ignores agreed changes."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "ScriptEditor", "issue": "Lines with an agreed change (memory edited_text) show the ORIGINAL text in the editor with no indication. If the user edits it there, the memory note still overrides it in Guião and rehearsal, which is confusing. Show the edited text or an 'ALTERADO por nota' hint.", "selector": "[data-testid^='edit-line-text-']", "priority": "LOW"},
+      {"component": "Rehearsal current-line-text", "issue": "With 'Esconder o meu texto' on, the blur uses transition-[filter] duration-300. When the actor's line becomes current it starts unblurred and fades to blurred over 300ms, so the line is readable briefly (seen in a screenshot). Apply the blur instantly when hiding (transition only when revealing).", "selector": "[data-testid='current-line-text']", "priority": "LOW"},
+      {"component": "Summary DiffRow", "issue": "After saving one diff as an agreed change, the summary 'script' state is not reloaded. A second diff on the same line computes new_text from the stale base and overwrites the first change.", "selector": "[data-testid^='diff-save-memory-btn-']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "ScriptEditor", "issues": ["Uses a native <select> for the character, unlike the shadcn Select used elsewhere (acceptable but inconsistent).", "React keys for new lines are index-based (`n${i}`) and shift on insert/delete; use a generated temp id."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_round3.py", "/app/backend/tests/test_ensaio_round2.py", "/app/backend/tests/test_ensaio_api.py", "/app/test_reports/pytest/pytest_round3.xml"],
+  "action_items": [
+    "rename_character: treat new == old (after upper) as a no-op, so the API no longer deletes the character",
+    "Optional: use effective_text for the previous cue in the evaluate_turn prompt",
+    "Optional: show edited_text/hint in ScriptEditor; blur the hidden line instantly; reload the script after saving a diff in Summary"
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1100 lines (>700). Split into modules: parsing, voices/tts, matching, sessions, prompts.",
+    "edits_map is rebuilt for every line in effective_text (O(n*m)); in link_note/prepare_audio compute it once.",
+    "update_lines assigns OpenAI voices with free[i % len(free)], where i is the index across ALL names, not new ones, so free voices can be skipped. Harmless but imprecise."
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_round3.py (new)", "/app/backend/tests/test_ensaio_round2.py (test_nunca_never_interrupts: latency assertion relaxed from <0.8s to <5s, because low-accuracy 'nunca' turns now go to the AI by design since the iteration 2 fix)"],
+  "success_rate": {"backend": "98% (52/53: 12/13 round3 + 40/40 regression)", "frontend": "100% of the requested flows"},
+  "test_credentials": "None; the app has no auth",
+  "seed_data_creation": "The TEST_R3 api and TEST_R3 UI scripts (with their sessions) were created and then deleted. The 'A Espera' demo and 'Rua Gagarin' were not modified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Demo id 6ae0b13a66c133cb3e5c88b4; don't touch 'Rua Gagarin' (6ae0b2bb18b7b9aa94dd6007). In rehearsal, click voice-toggle-btn before play-btn. Wait for my turn via current-line-text content + text-entry-input enabled. window.prompt is handled with page.on('dialog') + accept(answer). test_rename_same_name_keeps_character is expected to fail until the rename no-op fix.",
+  "rca of the issue": "rename_character: new = body.new.strip().upper(); when new == body.old, the branch `if new in [c.name ...]` is true and filters out `c.name != body.old`, which removes the only entry. Repro: POST /rename-character {old:'ANA', new:'ana'} -> characters []. Mitigation: `if new == body.old: return script_out(script)` before the merge logic."
+}

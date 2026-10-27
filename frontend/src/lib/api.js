@@ -16,7 +16,9 @@ export const api = {
     fd.append("file", file);
     return http.post("/extract", fd).then((r) => r.data);
   },
-  addMemory: (id, text) => http.post(`/scripts/${id}/memory`, { text }).then((r) => r.data),
+  addMemory: (id, text, extra = {}) => http.post(`/scripts/${id}/memory`, { text, ...extra }).then((r) => r.data),
+  updateLines: (id, lines) => http.put(`/scripts/${id}/lines`, { lines }).then((r) => r.data),
+  renameCharacter: (id, old, name) => http.post(`/scripts/${id}/rename-character`, { old, new: name }).then((r) => r.data),
   deleteMemory: (id, noteId) => http.delete(`/scripts/${id}/memory/${noteId}`).then((r) => r.data),
   scriptSessions: (id) => http.get(`/scripts/${id}/sessions`).then((r) => r.data),
   createSession: (body) => http.post("/sessions", body).then((r) => r.data),
@@ -36,6 +38,13 @@ export const api = {
     return http.post(`/sessions/${id}/voice-turn`, fd).then((r) => r.data);
   },
   voices: () => http.get("/voices").then((r) => r.data),
+  probe: (id, lineIdx, blob, final) => {
+    const fd = new FormData();
+    fd.append("line_idx", String(lineIdx));
+    fd.append("final", final ? "true" : "false");
+    fd.append("file", blob, `fala.${blob.type.includes("mp4") ? "mp4" : "webm"}`);
+    return http.post(`/sessions/${id}/probe`, fd).then((r) => r.data);
+  },
   setElevenVoice: (id, character, voice) => http.post(`/scripts/${id}/eleven-voice`, { character, voice }).then((r) => r.data),
   autoVoices: (id) => http.post(`/scripts/${id}/auto-voices`).then((r) => r.data),
   tts: (body) =>

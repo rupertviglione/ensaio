@@ -75,7 +75,12 @@ class BaseDocument(BaseModel):
         return cls.model_validate(doc) if doc else None
 
 
+def short_id() -> str:
+    return uuid.uuid4().hex[:10]
+
+
 class Line(BaseModel):
+    uid: str = Field(default_factory=short_id)
     idx: int
     character: Optional[str] = None
     text: str
@@ -93,6 +98,8 @@ class Character(BaseModel):
 class MemoryNote(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     text: str
+    line_uid: Optional[str] = None
+    new_text: Optional[str] = None
     created_at: str = Field(default_factory=now)
 
 
@@ -128,6 +135,7 @@ class Session(BaseDocument):
     instructions: str = ""
     strictness: str = "grave"
     start_idx: int = 0
+    focus_idxs: List[int] = []
     turns: List[Turn] = []
     status: str = "active"
     summary: Optional[dict] = None
@@ -296,6 +304,24 @@ class ScriptUpdate(BaseModel):
 
 class MemoryIn(BaseModel):
     text: str
+    line_idx: Optional[int] = None
+    new_text: Optional[str] = None
+
+
+class LineIn(BaseModel):
+    uid: Optional[str] = None
+    character: Optional[str] = None
+    text: str
+    kind: Literal["dialogue", "direction"] = "dialogue"
+
+
+class LinesIn(BaseModel):
+    lines: List[LineIn]
+
+
+class RenameIn(BaseModel):
+    old: str
+    new: str
 
 
 class TTSIn(BaseModel):
@@ -312,6 +338,7 @@ class SessionIn(BaseModel):
     instructions: str = ""
     strictness: Literal["grave", "rigor", "nunca"] = "grave"
     start_idx: int = 0
+    focus_idxs: List[int] = []
 
 
 class TurnIn(BaseModel):
@@ -332,6 +359,55 @@ async def get_session(session_id: str) -> Session:
     if not s:
         raise HTTPException(404, "Ensaio não encontrado")
     return s
+
+
+def edits_map(script: Script) -> dict:
+    return {m.line_uid: m for m in script.memory if m.line_uid and m.new_text}
+
+
+def effective_text(script: Script, ln: Line) -> str:
+    m = edits_map(script).get(ln.uid)
+    return m.new_text if m else ln.text
+
+
+def script_out(script: Script) -> dict:
+    d = script.model_dump()
+    em = edits_map(script)
+    for ln in d["lines"]:
+        m = em.get(ln["uid"])
+        ln["edited_text"] = m.new_text if m else None
+        ln["edit_note_id"] = m.id if m else None
+    return d
+
+
+async def save_characters(script: Script):
+    await db.scripts.update_one({"_id": oid(script.id)}, {"$set": {"characters": [c.model_dump() for c in script.characters]}})
+
+
+LINK_SYSTEM = """Recebes as falas numeradas de um texto de teatro e uma nota de ensaio (alteração acordada). PT-PT.
+Identifica a fala a que a nota se refere e escreve o texto completo da fala JÁ com a alteração aplicada (mantém tudo o resto exactamente igual).
+Se a nota não for uma alteração concreta ao texto de uma fala, devolve line_idx null.
+Responde APENAS JSON: {"line_idx": n|null, "new_text": "..."}"""
+
+
+async def link_note(script: Script, note_text: str, hint_idx: Optional[int] = None) -> tuple:
+    lines = "\n".join(f"[{ln.idx}] {ln.character}: {effective_text(script, ln)}" for ln in script.lines if ln.kind == "dialogue")
+    hint = f"\nA nota foi dita durante a fala [{hint_idx}] (ou perto dela)." if hint_idx is not None else ""
+    try:
+        r = parse_json(await ask_llm(LINK_SYSTEM, f"Falas:\n{lines}{hint}\n\nNota: {note_text}", FAST_MODEL))
+        idx = r.get("line_idx")
+        if isinstance(idx, int) and 0 <= idx < len(script.lines) and r.get("new_text"):
+            return script.lines[idx].uid, r["new_text"].strip()
+    except Exception as e:
+        log.warning("link_note falhou: %s", e)
+    return None, None
+
+
+async def link_note_bg(script: Script, note: MemoryNote, hint_idx: Optional[int]):
+    uid, new_text = await link_note(script, note.text, hint_idx)
+    if uid:
+        await db.scripts.update_one({"_id": oid(script.id), "memory.id": note.id},
+                                    {"$set": {"memory.$.line_uid": uid, "memory.$.new_text": new_text}})
 
 
 def memory_block(script: Script) -> str:
@@ -379,12 +455,67 @@ async def create_script(body: ScriptIn):
     assign_default_eleven(s)
     res = await db.scripts.insert_one(s.to_mongo())
     s.id = str(res.inserted_id)
-    return s.model_dump()
+    return script_out(s)
 
 
 @api.get("/scripts/{script_id}")
 async def read_script(script_id: str):
-    return (await get_script(script_id)).model_dump()
+    return script_out(await get_script(script_id))
+
+
+@api.put("/scripts/{script_id}/lines")
+async def update_lines(script_id: str, body: LinesIn):
+    script = await get_script(script_id)
+    lines = []
+    for x in body.lines:
+        text = x.text.strip()
+        if not text:
+            continue
+        char = (x.character or "").strip().upper() or None
+        kind = x.kind if char or x.kind == "direction" else "direction"
+        lines.append(Line(uid=x.uid or short_id(), idx=len(lines), character=char if kind == "dialogue" else None, text=text, kind=kind))
+    if not any(ln.kind == "dialogue" for ln in lines):
+        raise HTTPException(400, "O texto tem de ter pelo menos uma fala.")
+    existing = {c.name: c for c in script.characters}
+    names = []
+    for ln in lines:
+        if ln.kind == "dialogue" and ln.character not in names:
+            names.append(ln.character)
+    used = {c.voice for c in script.characters}
+    free = [v for v in VOICES if v not in used] or VOICES
+    chars = []
+    for i, n in enumerate(names):
+        chars.append(existing.get(n) or Character(name=n, voice=free[i % len(free)]))
+    script.lines, script.characters = lines, chars
+    assign_default_eleven(script)
+    uids = {ln.uid for ln in lines}
+    script.memory = [m for m in script.memory if not m.line_uid or m.line_uid in uids]
+    await db.scripts.update_one({"_id": oid(script_id)}, {"$set": {
+        "lines": [ln.model_dump() for ln in lines], "characters": [c.model_dump() for c in chars],
+        "memory": [m.model_dump() for m in script.memory]}})
+    return script_out(script)
+
+
+@api.post("/scripts/{script_id}/rename-character")
+async def rename_character(script_id: str, body: RenameIn):
+    script = await get_script(script_id)
+    new = body.new.strip().upper()
+    if not new or body.old not in [c.name for c in script.characters]:
+        raise HTTPException(400, "Nome inválido")
+    if new == body.old:
+        return script_out(script)
+    for ln in script.lines:
+        if ln.character == body.old:
+            ln.character = new
+    if new in [c.name for c in script.characters]:
+        script.characters = [c for c in script.characters if c.name != body.old]
+    else:
+        for c in script.characters:
+            if c.name == body.old:
+                c.name = new
+    await db.scripts.update_one({"_id": oid(script_id)}, {"$set": {
+        "lines": [ln.model_dump() for ln in script.lines], "characters": [c.model_dump() for c in script.characters]}})
+    return script_out(script)
 
 
 @api.put("/scripts/{script_id}")
@@ -395,7 +526,7 @@ async def update_script(script_id: str, body: ScriptUpdate):
     upd = body.model_dump(exclude_none=True)
     if upd:
         await db.scripts.update_one({"_id": oid(script_id)}, {"$set": upd})
-    return (await get_script(script_id)).model_dump()
+    return script_out(await get_script(script_id))
 
 
 @api.delete("/scripts/{script_id}")
@@ -409,8 +540,12 @@ async def delete_script(script_id: str):
 async def add_memory(script_id: str, body: MemoryIn):
     if not body.text.strip():
         raise HTTPException(400, "A nota está vazia.")
-    await get_script(script_id)
+    script = await get_script(script_id)
     note = MemoryNote(text=body.text.strip())
+    if body.line_idx is not None and body.new_text and 0 <= body.line_idx < len(script.lines):
+        note.line_uid, note.new_text = script.lines[body.line_idx].uid, body.new_text.strip()
+    else:
+        note.line_uid, note.new_text = await link_note(script, note.text, body.line_idx)
     await db.scripts.update_one({"_id": oid(script_id)}, {"$push": {"memory": note.model_dump()}})
     return note.model_dump()
 
@@ -480,8 +615,6 @@ async def synth(text: str, voice: str, character: Optional[str] = None, style: s
     if not text:
         raise HTTPException(400, "Texto vazio")
     voice = voice if voice in VOICES else PROMPTER_VOICE
-    if ELEVEN_KEY and not el_voice_id and not character:
-        el_voice_id = PROMPTER_EL
     use_el = bool(ELEVEN_KEY and el_voice_id)
     instructions = tts_instructions(character, style)
     sig = f"{text}|el|{el_voice_id}|{ELEVEN_MODEL}" if use_el else f"{text}|{voice}|gpt-4o-mini-tts|mp3|{instructions}"
@@ -511,14 +644,14 @@ async def prepare_audio(script: Script, character: str, start_idx: int):
     voices = {c.name: c for c in script.characters}
     todo = [ln for ln in script.lines[start_idx:] + script.lines[:start_idx]
             if ln.kind == "dialogue" and ln.character != character]
-    await asyncio.gather(*[synth(ln.text, voices[ln.character].voice, ln.character, voices[ln.character].style,
+    await asyncio.gather(*[synth(effective_text(script, ln), voices[ln.character].voice, ln.character, voices[ln.character].style,
                                  voices[ln.character].el_voice_id)
                            for ln in todo], return_exceptions=True)
 
 
 ELEVEN_PREMADE = [
     ("JBFqnCBsd6RMkjVDRZzb", "George", "male"), ("EXAVITQu4vr4xnSDxMaL", "Sarah", "female"),
-    ("onwK4e9ZLuTAKqWVaz9q", "Daniel", "male"), ("XrExE9yKIg1WjnnlVkGX", "Matilda", "female"),
+    ("XrExE9yKIg1WjnnlVkGX", "Matilda", "female"),
     ("nPczCjzI2devNBz1zQrb", "Brian", "male"), ("FGY2WhTYpPnrIDTdsKH5", "Laura", "female"),
     ("cjVigY5qzO86Huf0OWal", "Eric", "male"), ("XB0fDUnXU5powFXDhCwa", "Charlotte", "female"),
     ("iP95p4xoKVk53GoZ742B", "Chris", "male"), ("cgSgspJ2msm6clMCkdW9", "Jessica", "female"),
@@ -542,7 +675,9 @@ def guess_female(name: str) -> bool:
 def assign_default_eleven(script: Script, voices: Optional[list] = None) -> bool:
     if not ELEVEN_KEY:
         return False
-    pool = [v for v in (voices or premade_voices()) if v["id"] != PROMPTER_EL] or premade_voices()
+    pool = [v for v in (voices or []) if not v.get("premade")]
+    if not pool:
+        return False
     fem = [v for v in pool if v.get("gender") == "female"] or pool
     mal = [v for v in pool if v.get("gender") != "female"] or pool
     used, changed = {c.el_voice_id for c in script.characters if c.el_voice_id}, False
@@ -564,8 +699,8 @@ async def eleven_pt_voices() -> list:
     try:
         mine = await client.voices.get_all()
     except Exception as e:
-        log.warning("Sem permissão para listar vozes ElevenLabs (%s); a usar vozes pré-definidas", str(e)[-120:])
-        return premade_voices()
+        log.warning("Sem permissão para listar vozes ElevenLabs (%s)", str(e)[-120:])
+        return []
     for v in mine.voices:
         labels = v.labels or {}
         out.append({"id": v.voice_id, "name": v.name, "gender": labels.get("gender", ""),
@@ -574,7 +709,7 @@ async def eleven_pt_voices() -> list:
     try:
         res = await client.voices.get_shared(language="pt", page_size=100)
     except Exception:
-        return out + [v for v in premade_voices() if v["id"] not in seen]
+        return out
     for v in res.voices:
         tag = f"{v.accent or ''} {v.locale or ''}".lower()
         if not any(k in tag for k in ("pt-pt", "europ", "portug", "lisbo")) or "braz" in tag or "pt-br" in tag:
@@ -603,6 +738,7 @@ async def list_voices():
     if ELEVEN_KEY:
         try:
             data["elevenlabs"] = await eleven_pt_voices()
+            data["pt_native"] = bool(data["elevenlabs"])
         except Exception as e:
             log.exception("ElevenLabs voices: %s", e)
             data["error"] = "Não consegui obter as vozes ElevenLabs. Verifica a chave."
@@ -619,12 +755,12 @@ async def set_eleven_voice(script_id: str, body: ElevenVoiceIn):
     if not ELEVEN_KEY:
         raise HTTPException(400, "ElevenLabs não está configurado.")
     script = await get_script(script_id)
-    vid = await ensure_eleven_voice(body.voice)
+    vid = await ensure_eleven_voice(body.voice) if body.voice.get("id") else None
     for c in script.characters:
         if c.name == body.character:
             c.el_voice_id, c.el_voice_name = vid, body.voice.get("name", "")
-    await db.scripts.update_one({"_id": oid(script_id)}, {"$set": {"characters": [c.model_dump() for c in script.characters]}})
-    return script.model_dump()
+    await save_characters(script)
+    return script_out(script)
 
 
 @api.post("/scripts/{script_id}/auto-voices")
@@ -634,15 +770,15 @@ async def auto_eleven_voices(script_id: str):
     script = await get_script(script_id)
     voices = await eleven_pt_voices()
     if not voices:
-        raise HTTPException(404, "Não encontrei vozes ElevenLabs em português de Portugal.")
+        raise HTTPException(404, "Sem acesso às vozes PT-PT da biblioteca ElevenLabs: a chave precisa da permissão Voices: Read.")
     for c in script.characters:
         c.el_voice_id = None
     assign_default_eleven(script, voices)
     for c in script.characters:
         v = next(x for x in voices if x["id"] == c.el_voice_id)
         c.el_voice_id = await ensure_eleven_voice(v)
-    await db.scripts.update_one({"_id": oid(script_id)}, {"$set": {"characters": [c.model_dump() for c in script.characters]}})
-    return script.model_dump()
+    await save_characters(script)
+    return script_out(script)
 
 
 @api.post("/tts")
@@ -651,7 +787,10 @@ async def tts(body: TTSIn):
     return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
-async def transcribe(data: bytes, ext: str, hint: str = "") -> str:
+STT_PROMPT = "Português de Portugal. Transcreve exactamente o que é dito, palavra a palavra."
+
+
+async def transcribe(data: bytes, ext: str) -> str:
     if len(data) < 1000:
         return ""
     if ext not in OpenAISpeechToText.FILE_FORMATS:
@@ -659,17 +798,33 @@ async def transcribe(data: bytes, ext: str, hint: str = "") -> str:
     with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
-    prompt = "Transcrição literal em português de Portugal, com as palavras tal como são ditas, incluindo formas coloquiais."
-    if hint:
-        prompt = f"{prompt} {clean_for_tts(hint)[:600]}"
-    try:
-        engine = OpenAISpeechToText(api_key=LLM_KEY)
+    engine = OpenAISpeechToText(api_key=LLM_KEY)
+
+    async def run(model: str):
         with open(tmp_path, "rb") as f:
-            res = await engine.transcribe(file=f, model="whisper-1", language="pt", prompt=prompt, temperature=0)
+            kw = {"prompt": STT_PROMPT} if model != "whisper-1" else {"temperature": 0}
+            r = await asyncio.wait_for(engine.transcribe(file=f, model=model, language="pt", **kw), timeout=10)
+        t = r.text if hasattr(r, "text") else (r.get("text") if isinstance(r, dict) else str(r))
+        return (t or "").strip()
+
+    tasks = [asyncio.ensure_future(run(m)) for m in ("gpt-4o-mini-transcribe", "whisper-1")]
+    text = ""
+    try:
+        for fut in asyncio.as_completed(tasks):
+            try:
+                text = await fut
+            except Exception as e:
+                log.warning("STT falhou: %s", e)
+                continue
+            if text:
+                break
     finally:
+        for t in tasks:
+            t.cancel()
         os.unlink(tmp_path)
-    text = getattr(res, "text", None) or (res.get("text") if isinstance(res, dict) else str(res))
-    return (text or "").strip()
+    if not norm_tokens(text) or "transcreve exactamente" in " ".join(norm_tokens(text)):
+        return ""
+    return text
 
 
 @api.post("/stt")
@@ -764,7 +919,7 @@ async def create_session(body: SessionIn):
     if body.character not in [c.name for c in script.characters]:
         raise HTTPException(400, "Personagem inválida")
     if assign_default_eleven(script):
-        await db.scripts.update_one({"_id": oid(script.id)}, {"$set": {"characters": [c.model_dump() for c in script.characters]}})
+        await save_characters(script)
     s = Session(**body.model_dump())
     res = await db.sessions.insert_one(s.to_mongo())
     s.id = str(res.inserted_id)
@@ -798,23 +953,24 @@ async def evaluate_turn(session: Session, script: Script, line_idx: int, said: s
     if line_idx < 0 or line_idx >= len(script.lines):
         raise HTTPException(400, "Fala inválida")
     line = script.lines[line_idx]
-    m = local_match(line.text, said, 0.9 if session.strictness == "rigor" else 0.75)
-    exp_tokens = norm_tokens(line.text)
-    notes = [" ".join(norm_tokens(n.text)) for n in script.memory]
+    expected = effective_text(script, line)
+    m = local_match(expected, said, 0.9 if session.strictness == "rigor" else 0.75)
+    exp_tokens = norm_tokens(expected)
+    notes = [" ".join(norm_tokens(n.text)) for n in script.memory if not n.new_text]
     in_memory = any(" ".join(exp_tokens[i:i + 4]) in n for n in notes for i in range(max(1, len(exp_tokens) - 3)))
     verdict = None if in_memory else fast_verdict(session.strictness, m, len(exp_tokens), said)
     note = None
     if verdict:
         _, severity = verdict
-        turn = Turn(line_idx=line_idx, expected=line.text, said=said, mode=mode, kind="line",
+        turn = Turn(line_idx=line_idx, expected=expected, said=said, mode=mode, kind="line",
                     accuracy=m["accuracy"], severity=severity, differences=m["differences"])
     else:
         prev = next((ln for ln in reversed(script.lines[:line_idx]) if ln.kind == "dialogue"), None)
         prompt = (
             f"Instruções do actor: {session.instructions or '(nenhuma)'}\n"
             f"Memória do texto:\n{memory_block(script)}\n"
-            f"Deixa anterior ({prev.character if prev else '-'}): {prev.text if prev else '-'}\n"
-            f"Fala esperada ({line.character}): {line.text}\n"
+            f"Deixa anterior ({prev.character if prev else '-'}): {effective_text(script, prev) if prev else '-'}\n"
+            f"Fala esperada ({line.character}): {expected}\n"
             f"O actor disse ({mode}): {said}\n"
             f"Diferenças automáticas (precisão {m['accuracy']}%): {json.dumps(m['differences'], ensure_ascii=False)}"
         )
@@ -825,7 +981,7 @@ async def evaluate_turn(session: Session, script: Script, line_idx: int, said: s
             r = {"kind": "line", "accuracy": m["accuracy"], "severity": "major", "interrupt": False}
         kind = r.get("kind", "line")
         turn = Turn(
-            line_idx=line_idx, expected=line.text, said=said, mode=mode, kind=kind,
+            line_idx=line_idx, expected=expected, said=said, mode=mode, kind=kind,
             accuracy=r.get("accuracy", m["accuracy"]) if kind == "line" else None, severity=r.get("severity", "none"),
             interrupted=bool(r.get("interrupt")) and kind == "line" and session.strictness != "nunca",
             feedback=r.get("feedback", "") or "",
@@ -834,6 +990,7 @@ async def evaluate_turn(session: Session, script: Script, line_idx: int, said: s
         if kind == "note" and r.get("memory_note"):
             note = MemoryNote(text=r["memory_note"])
             await db.scripts.update_one({"_id": oid(script.id)}, {"$push": {"memory": note.model_dump()}})
+            asyncio.create_task(link_note_bg(script, note, line_idx))
             if not turn.feedback:
                 turn.feedback = "Anotado. Vou ter isso em conta."
     await db.sessions.update_one({"_id": oid(session.id)}, {"$push": {"turns": turn.model_dump()}})
@@ -858,11 +1015,45 @@ async def session_voice_turn(session_id: str, line_idx: int = Form(...), file: U
     if line_idx < 0 or line_idx >= len(script.lines):
         raise HTTPException(400, "Fala inválida")
     data = await file.read()
-    said = await transcribe(data, (file.filename or "a.webm").rsplit(".", 1)[-1].lower(), script.lines[line_idx].text)
+    said = await transcribe(data, (file.filename or "a.webm").rsplit(".", 1)[-1].lower())
     if not said:
         return {"said": "", "turn": None, "advance": False, "memory_note": None}
     res = await evaluate_turn(session, script, line_idx, said, "voz")
     return {"said": said, **res}
+
+
+def is_complete(expected: str, said: str) -> bool:
+    exp, got = norm_tokens(expected), norm_tokens(said)
+    if not got:
+        return False
+    if NEEDS_AI.search(" ".join(got)):
+        return True
+    tail = exp[-min(3, len(exp)):]
+    window = got[-(len(tail) + 2):]
+    hits, j = 0, 0
+    for t in tail:
+        for k in range(j, len(window)):
+            if difflib.SequenceMatcher(a=t, b=window[k]).ratio() >= 0.75:
+                hits, j = hits + 1, k + 1
+                break
+    end_ok = hits >= max(1, round(len(tail) * 0.67))
+    return end_ok and len(got) >= max(1, int(len(exp) * 0.6))
+
+
+@api.post("/sessions/{session_id}/probe")
+async def session_probe(session_id: str, line_idx: int = Form(...), final: bool = Form(False), file: UploadFile = File(...)):
+    session = await get_session(session_id)
+    script = await get_script(session.script_id)
+    if line_idx < 0 or line_idx >= len(script.lines):
+        raise HTTPException(400, "Fala inválida")
+    data = await file.read()
+    said = await transcribe(data, (file.filename or "a.webm").rsplit(".", 1)[-1].lower())
+    if not said:
+        return {"complete": final, "said": "", "turn": None, "advance": False, "memory_note": None}
+    if not final and not is_complete(effective_text(script, script.lines[line_idx]), said):
+        return {"complete": False, "said": said}
+    res = await evaluate_turn(session, script, line_idx, said, "voz")
+    return {"complete": True, "said": said, **res}
 
 
 SUMMARY_SYSTEM = """És um treinador de texto experiente para actores. Falas português de Portugal (PT-PT).
@@ -939,6 +1130,13 @@ JOÃO: Prometo. Afinal, alguém tem de ficar à espera."""
 
 @app.on_event("startup")
 async def seed():
+    premade = {i for i, _, _ in ELEVEN_PREMADE} | {"onwK4e9ZLuTAKqWVaz9q"}
+    async for d in db.scripts.find({"characters.el_voice_id": {"$in": list(premade)}}):
+        chars = [{**c, "el_voice_id": None, "el_voice_name": ""} if c.get("el_voice_id") in premade else c for c in d["characters"]]
+        await db.scripts.update_one({"_id": d["_id"]}, {"$set": {"characters": chars}})
+    async for d in db.scripts.find({"lines.uid": {"$exists": False}, "lines.0": {"$exists": True}}):
+        lines = [{**ln, "uid": short_id()} for ln in d["lines"]]
+        await db.scripts.update_one({"_id": d["_id"]}, {"$set": {"lines": lines}})
     if await db.scripts.count_documents({}) == 0:
         lines, chars = await build_structure(DEMO_TEXT)
         s = Script(title="A Espera", author="Cena de demonstração", raw_text=DEMO_TEXT, lines=lines, characters=chars)

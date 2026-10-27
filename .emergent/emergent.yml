@@ -1,3 +1,5 @@
 {
-  "env_image_name": "mono_fullstack_base_image_cloud_arm:release-26102026-2"
+  "env_image_name": "mono_fullstack_base_image_cloud_arm:release-26102026-2",
+  "job_id": "90d40562-ca22-4789-ac32-5aa450152f35",
+  "created_at": "2026-10-27T17:42:29.738493+00:00Z"
 }

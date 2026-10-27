@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Pause, Play, SkipBack, SkipForward, Lightbulb, Flag, Mic, MicOff } from "lucide-react";
+import { Pause, Play, SkipBack, SkipForward, Lightbulb, Flag, Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { api, errMsg } from "@/lib/api";
-import { playUrl, stopAudio, Recorder } from "@/lib/audio";
+import { playUrl, stopAudio, Recorder, startRecognition } from "@/lib/audio";
+import { isComplete } from "@/lib/match";
 import { ScriptView } from "@/components/script/ScriptView";
 import { loadPrefs } from "@/components/script/RehearsalSetup";
 import { MicButton } from "@/components/rehearsal/MicButton";
@@ -23,7 +24,10 @@ export default function Rehearsal() {
   const [reveal, setReveal] = useState(false);
   const [voiceOn, setVoiceOn] = useState(true);
   const [hideText, setHideText] = useState(true);
+  const [live, setLive] = useState("");
+  const [prompterVoice, setPrompterVoice] = useState(() => localStorage.getItem("ensaio-prompter-voice") !== "off");
   const run = useRef(0);
+  const srRef = useRef(null);
   const rec = useRef(null);
   const cache = useRef(new Map());
   const idxRef = useRef(0);
@@ -35,33 +39,37 @@ export default function Rehearsal() {
       setHideText(loadPrefs(sc.id).hideText ?? true);
       setSession(s);
       setScript(sc);
-      const resume = s.turns.length ? Math.max(...s.turns.map((t) => t.line_idx)) : s.start_idx;
+      const first = s.focus_idxs?.length ? buildPlan(sc.lines, s.focus_idxs, s.character)[0] : s.start_idx;
+      const resume = s.turns.length ? Math.max(...s.turns.map((t) => t.line_idx)) : first;
       setIdx(resume);
       idxRef.current = resume;
     }).catch(() => nav("/"));
     return () => {
       run.current++;
       stopAudio();
+      srRef.current?.stop();
       rec.current?.destroy();
     };
   }, [sessionId, nav]);
 
   const lines = script?.lines || [];
   const mine = session?.character;
+  const plan = session?.focus_idxs?.length ? buildPlan(lines, session.focus_idxs, mine) : null;
+  const nextOf = (i) => (plan ? plan.find((p) => p > i) ?? lines.length : i + 1);
 
   const goIdx = (i) => { idxRef.current = i; setIdx(i); };
 
   const getAudio = useCallback((l) => {
     if (!cache.current.has(l.idx)) {
       const c = script.characters.find((x) => x.name === l.character);
-      cache.current.set(l.idx, api.tts({ text: l.text, voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id }).catch(() => null));
+      cache.current.set(l.idx, api.tts({ text: lineText(l), voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id }).catch(() => null));
     }
     return cache.current.get(l.idx);
   }, [script]);
 
   const prefetch = (from) => {
     let n = 0;
-    for (let i = from; i < lines.length && n < 6; i++) {
+    for (let i = from; i < lines.length && n < 6; i = nextOf(i)) {
       const l = lines[i];
       if (l.kind === "dialogue" && l.character !== mine) { getAudio(l); n++; }
     }
@@ -70,7 +78,7 @@ export default function Rehearsal() {
   const finish = async () => {
     run.current++;
     stopAudio();
-    rec.current?.cancel();
+    rec.current?.cancel(); srRef.current?.stop();
     setPhase("finishing");
     try {
       await api.finish(sessionId);
@@ -87,26 +95,26 @@ export default function Rehearsal() {
     if (url && token === run.current) await playUrl(url);
   };
 
-  const submit = async (i, said, mode, token, blob) => {
+  const handleResult = async (i, r, token) => {
+    if (r.memory_note) toast.success("Guardado na memória do texto", { description: r.memory_note.text });
+    if (r.advance) {
+      setFeedback(r.turn.severity === "major" ? r.turn : null);
+      return runFrom(nextOf(i), token);
+    }
+    setFeedback(r.turn);
+    if (r.turn.feedback && prompterVoice) await speak(r.turn.feedback, token);
+    if (token !== run.current) return;
+    if (r.turn.kind === "line") setPhase("interrupted");
+    else listen(i, token);
+  };
+
+  const submit = async (i, said, mode, token) => {
     setPhase("processing");
-    if (said) setLastSaid(said);
+    setLastSaid(said);
     try {
-      const r = blob ? await api.voiceTurn(sessionId, i, blob) : await api.turn(sessionId, { line_idx: i, said, mode });
+      const r = await api.turn(sessionId, { line_idx: i, said, mode });
       if (token !== run.current) return;
-      if (blob) {
-        if (!r.turn) { toast("Não percebi o que disseste. Tenta outra vez."); setPhase("waiting"); return; }
-        setLastSaid(r.said);
-      }
-      if (r.memory_note) toast.success("Guardado na memória do texto", { description: r.memory_note.text });
-      if (r.advance) {
-        setFeedback(r.turn.severity === "major" ? r.turn : null);
-        return runFrom(i + 1, token);
-      }
-      setFeedback(r.turn);
-      if (r.turn.feedback) await speak(r.turn.feedback, token);
-      if (token !== run.current) return;
-      if (r.turn.kind === "line") setPhase("interrupted");
-      else listen(i, token);
+      await handleResult(i, r, token);
     } catch (e) {
       if (token !== run.current) return;
       toast.error(errMsg(e));
@@ -117,12 +125,53 @@ export default function Rehearsal() {
   const listen = async (i, token) => {
     setPhase("listening");
     setReveal(false);
-    prefetch(i + 1);
+    setLive("");
+    prefetch(nextOf(i));
     if (!voiceOn || !rec.current) return;
-    const blob = await rec.current.record({ silenceMs: 900, onLevel: (v) => setLevel((p) => (Math.abs(p - v) > 0.004 ? v : p)) });
-    if (token !== run.current) return;
+    let done = false;
+    let inflight = false;
+    let again = false;
+    const expected = lineText(lines[i]);
+    srRef.current?.stop();
+    srRef.current = startRecognition((t) => {
+      if (done || token !== run.current) return;
+      setLive(t);
+      if (!isComplete(expected, t)) return;
+      done = true;
+      rec.current?.cancel(); srRef.current?.stop();
+      srRef.current?.stop();
+      setLastSaid(t);
+      api.turn(sessionId, { line_idx: i, said: t, mode: "voz" })
+        .then((r) => token === run.current && handleResult(i, r, token))
+        .catch((e) => { if (token === run.current) { toast.error(errMsg(e)); setPhase("waiting"); } });
+    });
+    const probe = async (final) => {
+      if (done || (inflight && !final)) { again = !final; return; }
+      inflight = true;
+      try {
+        const blob = await rec.current.snapshot();
+        const r = await api.probe(sessionId, i, blob, final);
+        if (token !== run.current || done) return;
+        if (r.said) { setLive(r.said); setLastSaid(r.said); }
+        if (!r.complete) return;
+        done = true;
+        srRef.current?.stop();
+        rec.current.cancel();
+        if (!r.turn) { toast("Não percebi o que disseste. Tenta outra vez."); setPhase("waiting"); return; }
+        await handleResult(i, r, token);
+      } catch (e) {
+        if (final && token === run.current) { toast.error(errMsg(e)); setPhase("waiting"); }
+      } finally {
+        inflight = false;
+        if (again && !done && !final) { again = false; probe(false); }
+      }
+    };
+    const blob = await rec.current.record({ onPause: () => probe(false), onLevel: (v) => setLevel((p) => (Math.abs(p - v) > 0.004 ? v : p)) });
+    if (token !== run.current || done) return;
+    srRef.current?.stop();
     if (!blob) { setPhase("waiting"); return; }
-    submit(i, "", "voz", token, blob);
+    setPhase("processing");
+    probe(true);
   };
 
   const runFrom = async (start, existing) => {
@@ -132,14 +181,14 @@ export default function Rehearsal() {
       if (token !== run.current) return;
       const l = lines[i];
       goIdx(i);
-      if (l.kind !== "dialogue") { i++; continue; }
+      if (l.kind !== "dialogue") { i = nextOf(i); continue; }
       if (l.character === mine) return listen(i, token);
       setPhase("ai");
-      prefetch(i + 1);
+      prefetch(nextOf(i));
       const url = await getAudio(l);
       if (token !== run.current) return;
       if (url) await playUrl(url);
-      i++;
+      i = nextOf(i);
     }
     if (token === run.current) finish();
   };
@@ -159,7 +208,7 @@ export default function Rehearsal() {
     runFrom(idxRef.current);
   };
 
-  const pause = () => { run.current++; stopAudio(); rec.current?.cancel(); setPhase("paused"); };
+  const pause = () => { run.current++; stopAudio(); rec.current?.cancel(); srRef.current?.stop(); setPhase("paused"); };
 
   const onMic = () => {
     if (phase === "ready" || phase === "paused") return begin();
@@ -168,17 +217,23 @@ export default function Rehearsal() {
   };
 
   const onText = (t) => {
-    rec.current?.cancel();
+    rec.current?.cancel(); srRef.current?.stop();
     stopAudio();
     submit(idxRef.current, t, "escrito", ++run.current);
   };
 
   const jump = (dir) => {
-    let i = idxRef.current + dir;
-    while (i > 0 && i < lines.length && lines[i].kind !== "dialogue") i += dir;
-    i = Math.max(0, Math.min(lines.length - 1, i));
+    let i;
+    if (plan) {
+      const pos = plan.indexOf(idxRef.current);
+      i = plan[Math.max(0, Math.min(plan.length - 1, (pos < 0 ? 0 : pos) + dir))];
+    } else {
+      i = idxRef.current + dir;
+      while (i > 0 && i < lines.length && lines[i].kind !== "dialogue") i += dir;
+      i = Math.max(0, Math.min(lines.length - 1, i));
+    }
     stopAudio();
-    rec.current?.cancel();
+    rec.current?.cancel(); srRef.current?.stop();
     setFeedback(null);
     goIdx(i);
     if (phase === "ready" || phase === "paused") { run.current++; return; }
@@ -198,6 +253,7 @@ export default function Rehearsal() {
           <div>
             <p className="font-mono text-[11px] tracking-[0.3em] text-amber-500">SALA DE ENSAIO</p>
             <h1 className="font-serif text-2xl md:text-3xl font-semibold mt-1">{script.title} <span className="text-stone-500 font-normal">— {mine}</span></h1>
+            {plan && <p data-testid="focus-mode-badge" className="mt-1 text-xs font-mono tracking-widest text-rose-300">ZONAS A REVER · {session.focus_idxs.length} FALAS (COM A DEIXA)</p>}
           </div>
           <Button data-testid="finish-rehearsal-btn" onClick={finish} disabled={phase === "finishing"} variant="outline" className="rounded-full border-rose-500/40 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200">
             <Flag className="w-4 h-4 mr-2" /> Terminar
@@ -210,17 +266,21 @@ export default function Rehearsal() {
               <p className={`font-mono text-sm tracking-[0.3em] uppercase font-bold ${isMine ? "text-amber-400" : "text-sky-400"}`}>
                 {cur.kind === "direction" ? "Rubrica" : isMine ? "A tua fala" : cur.character}
               </p>
-              <p data-testid="current-line-text" className={`font-serif text-2xl md:text-3xl leading-snug mt-4 text-stone-100 transition-[filter] duration-300 ${showText ? "" : "blur-md select-none"}`}>
-                {cur.text}
+              <p data-testid="current-line-text" className={`font-serif text-2xl md:text-3xl leading-snug mt-4 text-stone-100 ${showText ? "transition-[filter] duration-300" : "blur-md select-none"}`}>
+                {lineText(cur)}
               </p>
+              {cur.edited_text && <p className="mt-2 text-[11px] font-mono tracking-widest text-emerald-400" data-testid="current-line-edited">ALTERAÇÃO ACORDADA</p>}
             </div>
           )}
           <MicButton phase={phase} level={level} onClick={onMic} />
+          {phase === "listening" && live && (
+            <p data-testid="live-transcript" className="text-sm italic text-stone-400 max-w-xl text-center">"{live}"</p>
+          )}
           {feedback && <FeedbackBox turn={feedback} said={lastSaid} />}
           {(phase === "interrupted" || (phase === "speaking" && feedback?.kind === "line")) && (
             <div className="flex gap-3">
               <Button data-testid="repeat-line-btn" onClick={() => { stopAudio(); setFeedback(null); listen(idxRef.current, ++run.current); }} className="rounded-full">Repetir a fala</Button>
-              <Button data-testid="continue-btn" variant="outline" onClick={() => { stopAudio(); setFeedback(null); runFrom(idxRef.current + 1); }} className="rounded-full">Continuar</Button>
+              <Button data-testid="continue-btn" variant="outline" onClick={() => { stopAudio(); setFeedback(null); runFrom(nextOf(idxRef.current)); }} className="rounded-full">Continuar</Button>
             </div>
           )}
         </div>
@@ -235,15 +295,31 @@ export default function Rehearsal() {
             <Ctl testid="next-line-btn" onClick={() => jump(1)} icon={SkipForward} label="Seguinte" />
             <Ctl testid="hint-btn" onClick={() => setReveal(true)} icon={Lightbulb} label="Dica" />
             <Ctl testid="voice-toggle-btn" onClick={() => setVoiceOn((v) => !v)} icon={voiceOn ? Mic : MicOff} label={voiceOn ? "Voz ligada" : "Só escrita"} />
+            <Ctl testid="prompter-voice-toggle-btn" onClick={() => setPrompterVoice((v) => { localStorage.setItem("ensaio-prompter-voice", v ? "off" : "on"); return !v; })}
+              icon={prompterVoice ? Volume2 : VolumeX} label={prompterVoice ? "Apontador fala" : "Apontador mudo"} />
           </div>
         </div>
       </section>
 
       <aside className="hidden lg:block rounded-2xl border border-white/[0.07] bg-[#141210]/70 backdrop-blur-xl p-4 h-[calc(100vh-8rem)] overflow-y-auto script-scroll sticky top-24" data-testid="rehearsal-script-panel">
-        <ScriptView lines={lines} myCharacter={mine} currentIdx={idx} hideMine={hideText} revealIdx={reveal ? idx : -1} />
+        <ScriptView lines={plan ? lines.filter((l) => plan.includes(l.idx)) : lines} myCharacter={mine} currentIdx={idx} hideMine={hideText} revealIdx={reveal ? idx : -1} />
       </aside>
     </div>
   );
+}
+
+const lineText = (l) => l.edited_text || l.text;
+
+function buildPlan(lines, focus, mine) {
+  const steps = new Set();
+  focus.forEach((f) => {
+    if (!lines[f]) return;
+    let c = f - 1;
+    while (c >= 0 && lines[c].kind !== "dialogue") c--;
+    if (c >= 0 && lines[c].character !== mine) steps.add(c);
+    steps.add(f);
+  });
+  return [...steps].sort((a, b) => a - b);
 }
 
 const Ctl = ({ testid, onClick, icon: Icon, label, accent }) => (

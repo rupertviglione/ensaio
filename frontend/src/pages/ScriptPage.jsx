@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Trash2 } from "lucide-react";
+import { Trash2, Pencil } from "lucide-react";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { ScriptEditor } from "@/components/script/ScriptEditor";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
@@ -19,6 +21,8 @@ export default function ScriptPage() {
   const [script, setScript] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [startIdx, setStartIdx] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const reload = () => api.getScript(id).then(setScript);
 
   useEffect(() => {
     api.getScript(id).then(setScript).catch(() => nav("/"));
@@ -56,10 +60,21 @@ export default function ScriptPage() {
             <TabsTrigger value="ensaios" className={tabCls} data-testid="tab-sessions">Ensaios ({sessions.length})</TabsTrigger>
           </TabsList>
           <TabsContent value="guiao">
-            <ScriptView lines={script.lines} startIdx={startIdx} onStartHere={setStartIdx} />
+            {editing ? (
+              <ScriptEditor script={script} onCancel={() => setEditing(false)} onSaved={(s) => { setScript(s); setEditing(false); setStartIdx(0); }} />
+            ) : (
+              <>
+                <div className="flex justify-end mb-3">
+                  <Button data-testid="edit-script-btn" variant="outline" size="sm" className="rounded-full" onClick={() => setEditing(true)}>
+                    <Pencil className="w-4 h-4 mr-2" /> Editar falas e personagens
+                  </Button>
+                </div>
+                <ScriptView lines={script.lines} startIdx={startIdx} onStartHere={setStartIdx} />
+              </>
+            )}
           </TabsContent>
           <TabsContent value="vozes"><CharactersPanel script={script} onSaved={setScript} /></TabsContent>
-          <TabsContent value="memoria"><MemoryPanel script={script} onChange={(memory) => setScript({ ...script, memory })} /></TabsContent>
+          <TabsContent value="memoria"><MemoryPanel script={script} onReload={reload} /></TabsContent>
           <TabsContent value="ensaios"><SessionsPanel sessions={sessions} /></TabsContent>
         </Tabs>
         <div className="lg:sticky lg:top-24">

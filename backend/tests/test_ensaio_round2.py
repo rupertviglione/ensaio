@@ -116,7 +116,7 @@ class TestStrictness:
         i = idx_of(demo, "Porque não sabia")
         r, dt = turn(s, sid, i, "Não sei, apetece-me batatas fritas.")
         assert r["advance"] is True and r["turn"]["interrupted"] is False
-        assert dt < 0.8
+        assert dt < 5  # since round 3, low-accuracy 'nunca' turns go to AI (help/note detection) but never interrupt
 
     def test_rigor_real_difference_interrupts(self, s, demo):
         sid = new_session(s, demo, "MARTA", "rigor", "Modo rigoroso: interrompe quando eu trocar, saltar ou acrescentar palavras.")
@@ -184,6 +184,7 @@ class TestVoiceTurn:
 
 # ---- ElevenLabs ----
 class TestEleven:
+    @pytest.mark.skip(reason="obsolete since round4: no premade ElevenLabs voices")
     def test_voices(self, s):
         d = s.get(f"{API}/voices").json()
         assert d["provider"] == "elevenlabs"
@@ -208,6 +209,7 @@ class TestEleven:
         print("prompter tts", time.time() - t0)
         assert r.status_code == 200 and len(r.content) > 1000
 
+    @pytest.mark.skip(reason="obsolete since round4: no premade ElevenLabs voices")
     def test_auto_voices_gender(self, s, colloq):
         r = s.post(f"{API}/scripts/{colloq['id']}/auto-voices")
         assert r.status_code == 200
@@ -222,6 +224,7 @@ class TestEleven:
         got = next(c for c in s.get(f"{API}/scripts/{colloq['id']}").json()["characters"] if c["name"] == "PEDRO")
         assert got["el_voice_id"] == "onwK4e9ZLuTAKqWVaz9q" and got["el_voice_name"] == "Daniel"
 
+    @pytest.mark.skip(reason="obsolete since round4: no premade ElevenLabs voices")
     def test_session_autoassigns(self, s, colloq):
         sc = s.get(f"{API}/scripts/{colloq['id']}").json()
         chars = [{**c, "el_voice_id": None, "el_voice_name": ""} for c in sc["characters"]]

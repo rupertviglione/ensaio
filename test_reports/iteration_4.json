@@ -1,0 +1,47 @@
+{
+  "summary": "Round 4 tested on backend and frontend using temporary TEST_R4 scripts (deleted afterwards; 'A Espera' and 'Rua Gagarin' untouched). Backend: the new suite test_ensaio_round4.py passes 19/19 after one fix by the tester. The full regression suite has 68 passed, 4 skipped: the obsolete premade-ElevenLabs assertions were skipped or removed. (1) Voices: GET /voices returns provider elevenlabs, elevenlabs [], pt_native false. New scripts have no el_voice_id. No script keeps premade IDs. auto-voices returns 404 with the 'Voices: Read' message. eleven-voice set ID then {id:null} clears it. Prompter /tts returns OpenAI mp3. (2) STT: real speech (TTS of the MARTA line) is transcribed exactly in 0.9-2.3s. Tiny audio and 2s of silence return ''. That second case only works after the tester's fix (see RCA). (3) /probe: partial audio with final=false returns {complete:false, said} and stores no turn. Full line returns complete:true, accuracy 100, advance:true, ~0.9s total. Partial with final=true is evaluated (accuracy <80) and stored. Silence returns complete:false; tiny audio with final=true returns complete:true and turn null; line_idx 999 returns 400. is_complete unit cases pass (full, no punctuation, partial, prefix-only, tail-only, small omissions). match.js isComplete gives the same results in node. Text /turn fast path takes 0.07s. (4) Frontend: in the Vozes tab the info text explains Voices: Read, there is no auto button, the OpenAI select is always visible, the Voice ID input then 'Usar' shows character-el-active-ANA, 'usar OpenAI' clears it, and changing the OpenAI voice persists. ScriptEditor shows edit-line-memory-hint-1 for the memory-edited line. Rehearsal (text mode) works: voice-toggle-btn changes to 'Só escrita'. prompter-voice-toggle-btn changes to 'Apontador mudo' and writes localStorage 'off', which persists after a reload. My line is blurred instantly (no transition class while hidden) and shows ALTERAÇÃO ACORDADA. A wrong answer shows the feedback box with repeat/continue and makes NO /api/tts request while muted. Repeat, then the correct edited text, advances; the last line goes to the summary (72%). Summary shows the diff row; rehearse-zones-btn opens focus mode with focus-mode-badge. Regression: library, new script and AI memory linking ('APLICADO EM SOFIA') work. No JS page errors. Not testable headless: Web Speech live-transcript, mic pause/3.2s silence cut (no microphone).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "is_complete (server) + /probe", "issue": "is_complete returns True immediately whenever the transcript contains a NEEDS_AI word (deixa, linha, texto, em vez de...). This happens even when the word is part of the expected line. Reproduced: expected 'Deixa-me ver a linha do comboio e depois falamos com calma.', said 'Deixa-me ver' -> True. For such lines the first pause probe cuts the actor off and evaluates a partial line (the exact 'cuts too early' complaint). Fix: only short-circuit when the help word is NOT in the expected tokens, or when the said text is short and does not match the line start."},
+      {"endpoint": "transcribe race", "issue": "The first non-empty result wins between gpt-4o-mini-transcribe and whisper-1. whisper-1 is known to hallucinate on near-silence or noise ('Obrigado.', 'Legendas por...'), and a hallucination returned first wins. Consider a blocklist of common whisper hallucinations, or prefer gpt-4o-mini-transcribe when both arrive within ~300ms."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "match.js isComplete", "issue": "HELP regex (texto|linha|deixa|...) makes isComplete return false for ANY line whose text contains these words. The client never detects completion for them and falls back to the server probe, which has the opposite bug (cuts early). Apply HELP only to tokens not present in the expected line.", "selector": "n/a", "priority": "MEDIUM"},
+      {"component": "Rehearsal listen/handleResult closures", "issue": "prompterVoice and voiceOn are read from the render closure captured when runFrom/listen started. Toggling 'Apontador mudo' during an active voice listen still speaks the feedback for that turn. Use refs for prompterVoice and voiceOn.", "selector": "[data-testid='prompter-voice-toggle-btn']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Rehearsal controls", "issues": ["At 1920px the 6 control buttons wrap: 'Apontador fala/mudo' sits alone on a second row. Consider a compact icon-only group or a smaller gap."]},
+      {"screen": "Vozes tab", "issues": ["The 11px stone-500 helper text 'A usar OpenAI. Opcional: voz ElevenLabs PT-PT.' has low contrast on the dark card."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_round4.py", "/app/backend/tests/test_ensaio_round3.py", "/app/backend/tests/test_ensaio_round2.py", "/app/backend/tests/test_ensaio_api.py", "/app/test_reports/pytest/pytest_round4.xml", "/app/test_reports/pytest/pytest_all_round4.xml"],
+  "action_items": [
+    "Fix is_complete (server) and isComplete (client) so help/note words that belong to the expected line do not short-circuit (server: premature cut; client: never completes)",
+    "Optional: guard against whisper-1 hallucinations in the STT race",
+    "Optional: use refs for prompterVoice/voiceOn inside listen/handleResult",
+    "Optional: rehearsal control-bar wrapping; Vozes helper-text contrast"
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1159 lines (>700). Split into modules: voices/tts, stt+matching, sessions, parsing, prompts.",
+    "Rehearsal.jsx listen(): srRef.current?.stop() is called twice in a row (line 141-142). Harmless duplicate.",
+    "Web Speech restarts in onend lose the earlier results (e.results resets per session), so a long line with a pause where Chrome ends the session will never satisfy the client 60%-length check. The server probe covers it, but consider accumulating the final results across restarts.",
+    "'Rua Gagarin' has EDDIE and GARY both on 'onyx' (duplicate OpenAI voice for two characters)."
+  ],
+  "updated_files": [
+    "/app/backend/server.py: transcribe(): fixed the text extraction. Before, `getattr(r,'text',None) or ... str(r)` turned an empty transcription into the repr 'TranscriptionResponse(text=\\'\\', ...)'. Now it uses r.text when present.",
+    "/app/backend/tests/test_ensaio_round4.py (new)",
+    "/app/backend/tests/test_ensaio_round2.py (skipped 3 premade-ElevenLabs tests now obsolete)",
+    "/app/backend/tests/test_ensaio_round3.py (skipped test_voices_premade_fallback; removed el_voice_id assertions)"
+  ],
+  "success_rate": {"backend": "100% after fix (19/19 round4, 68 passed / 4 obsolete skipped overall)", "frontend": "100% of the flows testable headless"},
+  "test_credentials": "None; the app has no auth",
+  "seed_data_creation": "The TEST_R4 api, TEST_R4 lat, TEST_R4 UI and TEST_R4 new scripts were created and then deleted (their sessions were cascade-deleted).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Demo 'A Espera' 6ae0b13a66c133cb3e5c88b4, 'Rua Gagarin' 6ae0b2bb18b7b9aa94dd6007: don't modify. test_ensaio_round4.py creates its own copy of DEMO_TEXT (imports server.DEMO_TEXT/is_complete via sys.path), generates audio via /api/tts and posts it to /stt and /probe. In the UI, click voice-toggle-btn before play-btn. Each browser_automation call is a fresh context, so localStorage resets.",
+  "rca of the issue": "Silence/empty STT returned garbage text: in transcribe(), `(getattr(r,'text',None) or (r.get('text') if isinstance(r, dict) else str(r)) or '')` is buggy, because when r.text == '' the `or` falls through to str(r), the whole TranscriptionResponse repr. That repr has many tokens, so the empty guard did not catch it. /stt returned the repr, and /probe with final=true would evaluate it as a totally wrong line, giving spurious 'not your line' interruptions on pauses or silences (consistent with the user's 'loops' complaint). Repro: POST /api/stt with a 2s silent WAV, which returned 'TranscriptionResponse(text=\\'\\', ...)'. Fixed by reading r.text directly; verified both now return ''."
+}

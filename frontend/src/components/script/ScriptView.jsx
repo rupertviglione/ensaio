@@ -26,7 +26,7 @@ export const ScriptView = ({ lines, myCharacter, startIdx, onStartHere, currentI
             ref={isCur ? curRef : null}
             data-testid={`script-line-${l.idx}`}
             className={`group relative rounded-xl px-5 py-3 border-l-2 transition-colors duration-300 ${
-              isCur ? "bg-amber-500/[0.14] border-amber-400" :
+              isCur ? "bg-amber-500/[0.14] border-amber-400" : l.edited_text ? "bg-emerald-500/[0.05] border-emerald-500/50" :
               mine ? "bg-amber-500/[0.05] border-amber-500/40" : "border-transparent hover:bg-white/[0.03]"
             } ${startIdx === l.idx ? "ring-1 ring-amber-500/50" : ""}`}
           >
@@ -44,9 +44,15 @@ export const ScriptView = ({ lines, myCharacter, startIdx, onStartHere, currentI
                 </button>
               )}
             </div>
-            <p className={`mt-1 text-base md:text-lg leading-relaxed text-stone-200 transition-[filter] duration-300 ${hidden ? "blur-[6px] select-none" : ""}`}>
-              {l.text}
+            <p className={`mt-1 text-base md:text-lg leading-relaxed text-stone-200 ${hidden ? "blur-[6px] select-none" : "transition-[filter] duration-300"}`}>
+              {l.edited_text || l.text}
             </p>
+            {l.edited_text && (
+              <p data-testid={`script-line-original-${l.idx}`} className={`mt-1 text-xs text-stone-500 ${hidden ? "blur-[6px] select-none" : ""}`}>
+                <span className="font-mono tracking-widest text-emerald-400 mr-2">ALTERADO</span>
+                <span className="line-through">{l.text}</span>
+              </p>
+            )}
           </div>
         );
       })}

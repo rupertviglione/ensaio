@@ -1,0 +1,24 @@
+# Requirements: Ensaio (treino de texto para actores)
+
+## Core Value
+Quero criar uma aplicação para treinar e ajudar a decorar texto. Os utilizadores são actores. Para já tem que funcionar para mim.
+
+## Personas & Roles
+Actores. Para já, um único utilizador (eu).
+
+## Features
+- Interface simples e clara para carregar o texto que se quer trabalhar. Aceita colar texto e ficheiros PDF ou Word.
+- Agente de IA que simule uma voz para cada papel envolvido. A IA irá fazer as vozes de todas as personagens que não a do actor. Vozes diferentes por personagem, em português de Portugal.
+- Simultaneamente deve verificar se o texto está a ser bem dito pelo actor, de acordo com as instruções dadas pelo actor. Exemplo: quero que interrompas apenas se houver algum erro grave, salto grande, mas que deixes passar pequenas trocas, enganos, ou repetições.
+- Interacção por voz em tempo real; também quero poder escrever.
+- No final de cada momento, quando o actor entende terminar, existe um resumo detalhado da sua prestação. A IA pode e deve sugerir zonas a rever, ajudar no processo de memorização. No resumo tudo o que foi diferente do texto fornecido deve ser dito.
+- A IA deve ter alguma memória sobre cada texto. Exemplo: o actor diz "Ah, aí entretanto mudámos nos ensaios e eu passei mesmo a dizer "X" em vez de "Y"" a IA deve memorizar essa informação para as próximas vezes em que o mesmo texto é trabalhado.
+
+## UI/UX Rules
+Interface e textos em português de Portugal.
+
+## Integrations
+IA com a chave universal Emergent: voz (TTS e STT) e modelo de texto (Claude Sonnet 5.5), vozes distintas por personagem.
+
+## Edge Cases
+Para já convém que funcione num ambiente local com alguma facilidade, para eu conseguir experimentar e ir aprofundando a coisa. Primeiro testo aqui online e depois descarrego. Quero ficar com os ficheiros para download, com tudo funcional (incluindo instruções simples para correr localmente).

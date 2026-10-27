@@ -1,0 +1,47 @@
+{
+  "summary": "Testou-se o backend e o frontend de ponta a ponta. Backend: 18/18 testes pytest passaram (seed, parse heurístico e fallback por LLM, extract de docx/pdf/formato não suportado, PUT de vozes, memória CRUD, ida e volta TTS->STT com 'pedra' reconhecido, turnos line/note/help com interrupção no modo rigoroso, finish com stats e idempotente, finish de sessão vazia, lista de sessões, last_score). Frontend: biblioteca, /novo com texto colado e com upload de .docx, separadores da página do texto (começar aqui, troca de voz que persiste após recarregar, pré-visualização TTS com audio/mpeg, adicionar/apagar memória, lista de ensaios), preparação do ensaio, sala de ensaio em modo só escrita (fala da IA com 'A contracena', fala correcta avança, fala errada mostra feedback-box com repetir/continuar, nota guardada com toast sem avançar, 'texto!' dá a deixa já com a memória aplicada), terminar -> resumo com pontuação, diferenças, zonas, dicas e o botão 'é alteração acordada' guardado. Não houve erros de JS na página. Os problemas encontrados são menores ou de qualidade da IA.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/scripts (heuristic_parse)", "issue": "Uma rubrica entre parêntesis numa linha própria, sem linha em branco antes, é colada à fala anterior. Exemplo: 'LUÍS: Deixei-a em cima da mesa, como sempre.\\n(Pausa.)' fica como a fala 'Deixei-a ... sempre. (Pausa.)'. Causa: a condição `s.startswith('(') and s.endswith(')') and not cur` falha quando já há uma fala aberta (cur), e o código cai no ramo que acrescenta o texto à fala. Correcção: tratar a linha só com parêntesis como rubrica mesmo com cur aberto (fazer flush primeiro)."},
+      {"endpoint": "POST /api/sessions/{id}/turn", "issue": "O LLM às vezes classifica uma tentativa de fala claramente errada como kind='other' em vez de 'line'. Exemplo no modo rigoroso: 'Não sei, apetece-me batatas fritas.'. Consequência: não há interrupção nem botões repetir/continuar, a accuracy fica nula e a tentativa fica de fora do resumo e das estatísticas, porque o finish só conta turnos 'line'. Sugestão: em caso de dúvida assumir 'line' no prompt, ou tratar 'other' na vez do actor como tentativa de fala, salvo se coincidir com padrões de nota ou pedido de ajuda."},
+      {"endpoint": "POST /api/scripts/{id}/memory", "issue": "Aceita texto vazio (sem validação no backend; só o frontend o impede) e devolve 200 mesmo quando o script não existe (update_one sem verificar matched_count). O mesmo acontece no PUT /scripts/{id} com id válido mas inexistente antes do get, e no DELETE da memória e do script."},
+      {"endpoint": "PUT /api/scripts/{id}", "issue": "A voz da personagem não é validada contra VOICES (o TTS faz fallback silencioso para 'sage')."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Rehearsal TextEntry", "issue": "O campo de texto continua activo durante a fase 'processing' (A VERIFICAR…) porque myTurn inclui 'processing'. O actor pode reenviar e criar turnos duplicados no backend; o resultado anterior é descartado pelo token, mas o turno fica gravado.", "selector": "[data-testid='text-entry-input']", "priority": "LOW"},
+      {"component": "Rehearsal repeat-line-btn", "issue": "Ao carregar em 'Repetir a fala' a feedback-box (com a fala correcta completa) continua visível. Isto anula o 'Esconder o meu texto' durante a nova tentativa. Sugestão: setFeedback(null) no repeat, ou recolher a caixa.", "selector": "[data-testid='repeat-line-btn']", "priority": "LOW"},
+      {"component": "Rehearsal speaking phase", "issue": "Enquanto o apontador lê o feedback em voz alta, repetir/continuar ficam escondidos (só aparecem na fase 'interrupted'). No headless isto demorou mais de 60 s entre gerar e reproduzir o TTS de um feedback longo. Sugestão: mostrar já repetir/continuar ou um botão para saltar a fala.", "selector": "[data-testid='continue-btn']", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Rehearsal script panel / ScriptView", "issue": "Depois de guardar uma nota de memória (ex.: 'agora digo Perdi-o de propósito'), o guião no ensaio e na página do texto continua a mostrar o texto original. As alterações só existem na memória, por isso a revelação/dica mostra o texto antigo.", "affected_selectors": ["[data-testid='rehearsal-script-panel']"]},
+      {"flow": "Reabrir um ensaio em curso", "issue": "Ao voltar a abrir /ensaio/:id de uma sessão 'EM CURSO', a sessão recomeça em start_idx e perde o progresso. Os ensaios abandonados ficam como 'EM CURSO' para sempre na lista de ensaios.", "affected_selectors": ["[data-testid='tab-sessions']"]}
+    ],
+    "design_issues": [
+      {"screen": "Rehearsal (mobile 390px)", "issues": ["O placeholder do campo de texto fica cortado ('Escreve a tua fala ou uma nota (e'); em mobile convém um placeholder mais curto."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_api.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Corrigir o heuristic_parse para que uma linha só com '(rubrica)' a seguir a uma fala seja uma rubrica separada e não seja colada à fala",
+    "Tornar o /turn robusto: tentativas erradas na vez do actor não devem ser classificadas como 'other' e perder-se no resumo",
+    "Desactivar o text-entry durante 'processing'",
+    "Limpar ou esconder a feedback-box ao repetir a fala quando o texto está escondido",
+    "Opcional: validar memória vazia, script inexistente e voz no backend; mostrar as alterações da memória no guião"
+  ],
+  "critical_code_review_comments": [
+    "server.py tem 640 linhas, perto do limite; convém separar modelos, parsing, prompts e rotas.",
+    "add_memory, update_script e delete não verificam matched_count, por isso devolvem 200 para ids inexistentes.",
+    "O tts_cache em disco cresce sem limite.",
+    "Rehearsal.listen captura voiceOn numa closure: se o microfone falha a meio, setVoiceOn(false) não afecta o loop em curso. Está mitigado pelo teste `!rec.current`."
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_api.py"],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "~92% (todos os fluxos pedidos funcionam; problemas menores de UX/IA)"},
+  "test_credentials": "Nenhuma; a app não tem autenticação",
+  "seed_data_creation": "Os scripts TEST_ e TEST_UI Cena foram apagados. As notas de memória de teste no demo 'A Espera' foram removidas (fica uma nota já existente: 'Hoje é mesmo dia de pedra'). Ficam no demo várias sessões MARTA (2 terminadas, 2 em curso).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Usar o modo só escrita (voice-toggle-btn) antes do play-btn, porque o headless não tem microfone. O estado do ensaio vem de rehearsal-status: 'a ouvir-te…' (vez do actor), 'repete ou continua' (interrompido), 'o apontador está a falar'. O TTS do feedback pode demorar mais de 60 s no headless. O id do demo era 6ae0b13a66c133cb3e5c88b4. A suite pytest demora cerca de 30 s e usa um PDF feito à mão e um docx criado com python-docx."
+}

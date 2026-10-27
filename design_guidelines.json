@@ -1,0 +1,67 @@
+{
+  "project_name": "Ensaio - Treino de Texto para Actores",
+  "app_type": "saas_app / single-user tool",
+  "language": "pt-PT",
+  "archetype": "THEATER BACKSTAGE & SOUND STUDIO (Dramatic, Precise, Tactile)",
+  "theme_strategy": {
+    "default_mode": "dark",
+    "theme_description": "Ambiente de bastidores de teatro e estúdio de dobragem. Fundo carvão aquecido (Obsidian Charcoal), acentos Dourado de Holofote (Stage Gold) e Carmim Teatral. Contraste focado na legibilidade extrema de guiões sob luz ambiente reduzida.",
+    "color_palette": {
+      "background_primary": "#0A0908",
+      "background_secondary": "#141210",
+      "background_card": "#1C1917",
+      "border_subtle": "rgba(255, 255, 255, 0.08)",
+      "border_active": "rgba(245, 158, 11, 0.4)",
+      "accent_gold": "#F59E0B",
+      "accent_gold_glow": "rgba(245, 158, 11, 0.25)",
+      "accent_crimson": "#E11D48",
+      "accent_emerald": "#10B981",
+      "text_primary": "#F5F5F4",
+      "text_secondary": "#A8A29E",
+      "text_muted": "#78716C",
+      "actor_highlight_bg": "rgba(245, 158, 11, 0.12)",
+      "actor_highlight_border": "#F59E0B",
+      "ai_highlight_bg": "rgba(59, 130, 246, 0.12)",
+      "ai_highlight_border": "#60A5FA"
+    }
+  },
+  "typography": {
+    "font_family_heading": "Cormorant Garamond, Serif",
+    "font_family_body": "Plus Jakarta Sans, sans-serif",
+    "font_family_script": "JetBrains Mono, Courier Prime, monospace",
+    "google_fonts_url": "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap",
+    "hierarchy": {
+      "h1": "text-4xl md:text-5xl font-serif tracking-tight font-bold text-stone-100",
+      "h2": "text-2xl md:text-3xl font-serif font-semibold text-stone-100",
+      "h3": "text-xl md:text-2xl font-sans font-semibold text-stone-200",
+      "script_character": "font-mono text-sm tracking-widest uppercase font-bold text-amber-400",
+      "script_dialogue": "font-sans text-base md:text-lg leading-relaxed text-stone-200",
+      "script_parenthetical": "font-serif italic text-sm text-stone-400"
+    }
+  },
+  "key_features_design": {
+    "1_biblioteca_de_textos": "Lista elegante em grelha bento de guiões carregados (ex: 'Amor de Perdição - Acto II', 'O Urso - Chekhov', 'Macbeth - Cena III'). Cada cartão inclui autor, número de personagens, data do último ensaio, percentagem de precisão de memorização e atalho directo para 'Ensaiar Agora'.",
+    "2_carregar_texto": "Zona de drop e colar intuitivo de texto (Ficheiro PDF, Word ou Colar Directo). Processamento inteligente com deteção automática de personagens (extracção de nomes em maiúsculas ou padrões 'NOME: fala'). Permite edição rápida de papéis detetados.",
+    "3_vista_do_guiao": "Visualizador de guião em modo estúdio com formatação teatral autêntica (nomes de personagens destacados, rubricas em itálico). Permite seleccionar qual é a personagem do actor ('O meu papel') e atribuição de vozes PT-PT às restantes personagens da IA (Voz Masculina PT, Voz Feminina PT, Tom Dramático, Tom Natural, Velocidade da fala).",
+    "4_instrucoes_de_correccao": "Painel de configuração de ensaio com regras do apontador virtual: 'Interromper só em erros graves (palavras-chave em falha)', 'Modo Rigoroso (palavra por palavra)', 'Modo Apontador (dar dica se o actor se calar 3s)', 'Correção em tempo real vs no final'.",
+    "5_sala_de_ensaio": "Interface imersiva de estúdio. Botão central gigante de microfone com pulsação tátil e estados distintos: 'A ouvir o actor...' (anéis dourados a pulsar), 'A IA a responder [Nome da Personagem]...' (onda sonora animada), 'Pausa/Aguardar'. Mostra em grande destaque a fala actual que deve ser dita ou que a IA está a proferir. Inclui caixa de entrada de texto alternativa e botão de interrupção manual.",
+    "6_resumo_da_prestacao": "Relatório detalhado pós-ensaio com nota global (ex: 92% de precisão), mapa de calor do guião com zonas a rever (palavras esquecidas a vermelho, hesitações a amarelo, alterações a verde), transcrição comparativa (Texto Original vs O que o Actor Disse) e dicas de memorização personalizadas.",
+    "7_memoria_do_texto": "Separador de notas e alterações acordadas nos ensaios. Se o encenador/actor decidir mudar uma palavra ou adaptar uma linha, essa alteração fica gravada e a IA passa a considerar o novo texto como correto."
+  },
+  "image_urls": {
+    "hero_stage_portrait": "https://images.unsplash.com/photo-1750617248316-ad99e772c53d?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHw0fHx0aGVhdGVyJTIwc3RhZ2UlMjBhY3RvciUyMGxpZ2h0aW5nJTIwc3R1ZGlvJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzkzMTA5OTU5fDA&ixlib=rb-4.1.0&q=85",
+    "actor_spotlight": "https://images.unsplash.com/photo-1730148138168-6f53ddda1f02?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwxfHx0aGVhdGVyJTIwc3RhZ2UlMjBhY3RvciUyMGxpZ2h0aW5nJTIwc3R1ZGlvJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzkzMTA5OTU5fDA&ixlib=rb-4.1.0&q=85",
+    "studio_actor": "https://images.unsplash.com/photo-1663720526392-d62ceb4e825c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwyfHx0aGVhdGVyJTIwc3RhZ2UlMjBhY3RvciUyMGxpZ2h0aW5nJTIwc3R1ZGlvJTIwcG9ydHJhaXR8ZW58MHx8fHwxNzkzMTA5OTU5fDA&ixlib=rb-4.1.0&q=85"
+  },
+  "instructions_to_main_agent": [
+    "GARANTIR que toda a interface, menus, botões, estados e mensagens estão integralmente em Português de Portugal (PT-PT). Usar termos como: 'Actores', 'Ensaio', 'Guião', 'Personagem', 'Carregar Texto', 'O meu papel', 'Sala de Ensaio', 'Prestação', 'Resumo', 'Memória do Texto'.",
+    "Implementar uma barra de navegação superior fixa (Header) com logo 'ENSAIO', indicador de voz PT-PT ativa, e guias claras: [Biblioteca de Guiões], [Novo Texto], [Sala de Ensaio], [Resumo & Memória].",
+    "Incluir um conjunto pré-carregado de 3 guiões demonstrativos em PT-PT para teste imediato: 1) 'O Urso' (Anton Tchekhov - Cena entre Helena e Smirnov), 2) 'Frei Luís de Sousa' (Almeida Garrett - Acto I, Cena I), 3) 'Monólogo do Actor' (Texto Contemporâneo).",
+    "Na Sala de Ensaio, criar um simulador de voz interativo avançado usando a Web Speech Synthesis API do browser com vozes em português de Portugal (pt-PT) ou simulação realista de áudio com síntese visual (waveform animado e reprodução áudio), onde a IA lê as falas das outras personagens com vozes distintas e aguarda a fala do actor.",
+    "Implementar reconhecimento de voz (Web Speech Recognition API em pt-PT com fallback de escrita manual) para ouvir o actor em tempo real, destacar as palavras pronunciadas corretamente em verde e assinalar discrepâncias.",
+    "Adicionar um painel de 'Instruções de Correção' acessível antes ou durante o ensaio: Interromper imediatamente em erro, apenas sinalizar no final, sugerir primeira palavra da fala (dica de apontador).",
+    "No 'Resumo da Prestação', fornecer métricas detalhadas: % de palavras exatas, tempo total de ensaio, mapa de hesitações, lista de alterações acordadas na 'Memória do Texto'.",
+    "Todos os elementos interativos DEVEM conter o atributo data-testid (ex: data-testid='start-rehearsal-button', data-testid='mic-toggle-button', data-testid='upload-script-input', data-testid='character-select').",
+    "Manter o visual esteticamente arrebatador: fundos escuros de estúdio de iluminação de palco (#0A0908), detalhes com brilho dourado de holofote (amber/gold), tipografia dramática Serif + Sans, e animações fluidas."
+  ]
+}

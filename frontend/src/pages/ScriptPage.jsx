@@ -6,9 +6,11 @@ import { Button } from "@/components/ui/button";
 import { ScriptEditor } from "@/components/script/ScriptEditor";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api } from "@/lib/api";
+import { api, errMsg } from "@/lib/api";
 import { ScriptView } from "@/components/script/ScriptView";
 import { CharactersPanel } from "@/components/script/CharactersPanel";
+import { PronunciationPanel } from "@/components/script/PronunciationPanel";
+import { AutoMarkedNote } from "@/components/script/AutoMarkedNote";
 import { MemoryPanel } from "@/components/script/MemoryPanel";
 import { SessionsPanel } from "@/components/script/SessionsPanel";
 import { RehearsalSetup } from "@/components/script/RehearsalSetup";
@@ -56,6 +58,7 @@ export default function ScriptPage() {
           <TabsList className="bg-[#141210] rounded-full p-1 h-auto mb-8">
             <TabsTrigger value="guiao" className={tabCls} data-testid="tab-script">Guião</TabsTrigger>
             <TabsTrigger value="vozes" className={tabCls} data-testid="tab-voices">Vozes</TabsTrigger>
+            <TabsTrigger value="pronuncia" className={tabCls} data-testid="tab-pronunciation">Pronúncia</TabsTrigger>
             <TabsTrigger value="memoria" className={tabCls} data-testid="tab-memory">Memória ({script.memory.length})</TabsTrigger>
             <TabsTrigger value="ensaios" className={tabCls} data-testid="tab-sessions">Ensaios ({sessions.length})</TabsTrigger>
           </TabsList>
@@ -69,11 +72,14 @@ export default function ScriptPage() {
                     <Pencil className="w-4 h-4 mr-2" /> Editar falas e personagens
                   </Button>
                 </div>
-                <ScriptView lines={script.lines} startIdx={startIdx} onStartHere={setStartIdx} />
+                <AutoMarkedNote script={script} onSaved={setScript} />
+                <ScriptView lines={script.lines} startIdx={startIdx} onStartHere={setStartIdx} autoMarked={script.auto_marked || []}
+                  onRevert={async (l) => { try { setScript(await api.patchLine(script.id, l.uid, { kind: "direction" })); toast.success("Linha reposta"); } catch (e) { toast.error(errMsg(e)); } }} />
               </>
             )}
           </TabsContent>
           <TabsContent value="vozes"><CharactersPanel script={script} onSaved={setScript} /></TabsContent>
+          <TabsContent value="pronuncia"><PronunciationPanel script={script} /></TabsContent>
           <TabsContent value="memoria"><MemoryPanel script={script} onReload={reload} /></TabsContent>
           <TabsContent value="ensaios"><SessionsPanel sessions={sessions} /></TabsContent>
         </Tabs>

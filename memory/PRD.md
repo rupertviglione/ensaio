@@ -65,6 +65,23 @@ App para treinar e decorar texto (actores, utilizador único). Carregar texto (c
 - Melhorias F-23: contador "AS TUAS FALAS x/y", distintivo MODO SALTAR, toasts ao ligar/desligar, T/S lembrados por texto, "Repor fala", latência de salto em window.__ensaioLatency, painel lateral rola por dentro (o cabeçalho não se mexe), botões perdem o foco após clique (Espaço/Enter ficam para os atalhos)
 - Testes: tests/test_ensaio_phase3.py 13/13 + phase2 18/18; iteração 7 frontend 100%
 
+## Round 7 (2026-10-29) — escuta fiável, texto esperado, pronúncia, definições
+- Deepgram: proxy WebSocket no backend (`/api/stt/deepgram`, chave só no servidor, heartbeat 15 s para a ingress não cortar), ligação directa com token como recurso; verificado em Chromium real com fake mic através da ingress (badge "Escuta: Deepgram")
+- Microfone/STT sempre abertos (áudio enviado sempre, eco filtrado); watchdog 3 s + visibilitychange/focus: retoma AudioContext, religa socket, volta ao motor principal; reenvio de ~1,5 s de áudio após queda; aviso "Microfone desligado" + "Reactivar microfone"
+- Comparação a raciocinar com o texto: siglas/letras soletradas e tratadas como implausíveis ("A RTP" ≈ "arrota"), prefixos ("malandra" ≈ "malandreco"), palavras inexistentes (wordfreq) assumidas como o texto, alinhamento DP fonético com junções 1↔2/3, fusão de regiões separadas por palavra curta; espelho em match.js; confirmação em segundo plano com Sonnet (por defeito erro de reconhecimento, negações só se confirmadas)
+- Keyterms Deepgram = palavras raras/nomes/estrangeiras do bloco actual + seguinte (≤100); Gemini recebe o texto do bloco como vocabulário/contexto
+- Pronúncia: detecção com Claude (segue a grafia do texto: "New York" em inglês, "Nova Iorque" em português), separador Pronúncia editável, aplicada a TTS (respelling), keyterms e matching (variantes)
+- Teleponto para falas >240 caracteres (frase actual ± contexto, caixa fixa), transcrição ao vivo limitada a 2 linhas, bola do microfone menor
+- Definições: chaves ElevenLabs/Deepgram/Gemini validadas e guardadas em Mongo (prioridade sobre .env, só últimos 4 visíveis, créditos/saldo/permissões); ElevenLabs passa a principal automaticamente com chave válida (voz pt-PT distinta por personagem), Edge reserva; camada TTS plugável (TTS_PROVIDERS); "Automático" no separador Vozes
+- Pós-parse: números de página, cabeçalhos repetidos (incl. "cabeçalho lido como personagem" só com a mesma fala ≥3×) e marcas de impressão → "Texto não pertencente"; nota dispensável no Guião + REPOR por linha
+- Evidência: leituras completas no browser real (tests/e2e/browser_readthrough.py): Deepgram limpo/distorcido MARTA 0/0 erros falsos; Gemini limpo/distorcido JOÃO 0/0; texto com estrangeiros RITA Deepgram limpo 0, TIAGO Deepgram distorcido 0, TIAGO Gemini limpo 0. Testes: test_ensaio_round7.py 17/17, UI 32/34 (2 corrigidos depois)
+- Pendente: chave ElevenLabs válida (a do .env é o ID da chave) — colar em Definições
+- Marcação "não pertencente" corrigida: só texto com forma de cabeçalho/rodapé (maiúsculas, título, autor, "Acto", "—") E evidência posicional (junto a nº de página; direcções também por espaçamento regular). Falas de personagem nunca são normalizadas por dígitos e precisam de nº de página próximo. Testes round9/round10 + e1 nonbelong (30/30)
+- Definições: botão "Testar" + POST /api/settings/keys/{p}/validate (dry-run, não guarda)
+- ScriptView: data-current="true" na linha activa
+- ElevenLabs: chave válida mas plano free → vozes da biblioteca pt-PT devolvem 402; vozes bloqueadas ficam em memória (EL_BLOCKED, /api/tts/status) e vai directo a Edge sem nova tentativa
+- Fim de bloco: quando o fim é detectado pelo conteúdo mas a última palavra ainda não chegou, a resposta da IA arranca na mesma hora e o texto avaliado espera pela última palavra (Deepgram ≤250 ms, Gemini ≤1200 ms) no socket do bloco anterior (transcrição por bloco/socket); leituras: Deepgram MARTA e Gemini JOÃO com todas as últimas palavras, 0 erros falsos, latência fim→IA 20–34 ms inalterada
+
 ## Backlog
 - Teste humano com microfone real (Deepgram/Gemini, failover a meio do bloco, colunas do portátil)
 - P2: dividir server.py em módulos (scripts, vozes, sessões)

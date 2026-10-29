@@ -303,3 +303,18 @@ def _seed(v) -> dict:
 
 def seed_catalog() -> dict:
     return {"voices": [_seed(v) for v in SEED_VOICES], "prompter": _seed(SEED_PROMPTER), "model": TTS_MODEL, "source": "seed"}
+
+
+def set_key(key: str):
+    global KEY
+    KEY = (key or "").strip()
+    old = _http.pop("c", None)
+    if old:
+        asyncio.ensure_future(old.aclose())
+    STATUS.update(checked_at=0.0, valid=None, perms={}, errors={})
+
+
+async def user_info() -> dict:
+    r = await req("GET", "/v1/user")
+    sub = r.json().get("subscription") or {}
+    return {"character_count": sub.get("character_count"), "character_limit": sub.get("character_limit"), "tier": sub.get("tier")}

@@ -22,6 +22,7 @@ export const api = {
   },
   addMemory: (id, text, extra = {}) => http.post(`/scripts/${id}/memory`, { text, ...extra }).then((r) => r.data),
   patchLine: (id, uid, patch) => http.patch(`/scripts/${id}/lines/${uid}`, patch).then((r) => r.data),
+  dismissAutoMarked: (id) => http.post(`/scripts/${id}/auto-marked/dismiss`).then((r) => r.data),
   updateLines: (id, lines) => http.put(`/scripts/${id}/lines`, { lines }).then((r) => r.data),
   renameCharacter: (id, old, name) => http.post(`/scripts/${id}/rename-character`, { old, new: name }).then((r) => r.data),
   deleteMemory: (id, noteId) => http.delete(`/scripts/${id}/memory/${noteId}`).then((r) => r.data),
@@ -46,6 +47,13 @@ export const api = {
   elevenStatus: () => http.get("/eleven/status").then((r) => r.data),
   sttToken: () => http.post("/stt/token").then((r) => r.data),
   sttDeepgram: () => http.post("/stt/deepgram-token").then((r) => r.data),
+  settingsKeys: () => http.get("/settings/keys").then((r) => r.data),
+  setKey: (provider, key) => http.put(`/settings/keys/${provider}`, { key }).then((r) => r.data),
+  validateKey: (provider, key) => http.post(`/settings/keys/${provider}/validate`, { key }).then((r) => r.data),
+  checkKey: (provider) => http.post(`/settings/keys/${provider}/check`).then((r) => r.data),
+  pronunciation: (id) => http.get(`/scripts/${id}/pronunciation`).then((r) => r.data),
+  savePronunciation: (id, items) => http.put(`/scripts/${id}/pronunciation`, { items }).then((r) => r.data),
+  detectPronunciation: (id) => http.post(`/scripts/${id}/pronunciation/detect`).then((r) => r.data),
   sttGemini: () => http.post("/stt/gemini-token").then((r) => r.data),
   sttEngines: () => http.get("/stt/engines").then((r) => r.data),
   ttsStatus: () => http.get("/tts/status").then((r) => r.data),
@@ -55,8 +63,10 @@ export const api = {
     http.post("/tts", body, { responseType: "blob" }).then((r) => URL.createObjectURL(r.data)),
 };
 
-export const voiceBody = (c) => ({
-  voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id,
+export const WS_BASE = (process.env.REACT_APP_BACKEND_URL || window.location.origin).replace(/^http/, "ws");
+
+export const voiceBody = (c, scriptId) => ({
+  voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id, script_id: scriptId,
   tts: c.tts, edge_voice: c.edge_voice, edge_pitch: c.edge_pitch, edge_rate: c.edge_rate,
 });
 

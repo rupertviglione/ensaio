@@ -1,0 +1,37 @@
+{
+  "summary": "Tested mark_non_script fix, the dry-run key validate endpoint, tts/status eleven_blocked_voices, the Settings 'Testar' button and data-current in ScriptView. Passing: e1_tests/test_tscheck_settings_nonbelong.py (all, including test_similar_dialogue_not_marked_header), round7 TestPaged (7 auto-marked), the validate endpoint (invalid -> valid:false, saved:false, keys unchanged, 404, 400), tts/status list, the uppercase stage direction that is repeated irregularly (not marked), the Settings UI and data-current. FAILING: (1) the ROOT BUG IS STILL OPEN when the repeats are regularly spaced. PEDRO: 'Sim.' x3 (every 3 lines) and MARIA: 'Não.' x4 (every 4 lines) are still turned into foreign lines and lose their speaker. (2) A repeated footer 'Texto de João Silva' next to page numbers is NOT marked.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/scripts (mark_non_script, server.py ~L325-337)", "issue": "Dialogue that repeats at regular intervals is still auto-marked foreign and loses its speaker. For dialogue, the grouping key text is built as f'{character} — {text}'. That string always contains '—', so RE_HEADER_WORD matches and _header_like() is always True for dialogue. The positional check then passes through _regular(pos) (gaps >=3 and max<=2*min), which is common in a real back-and-forth. Repro: 3 rounds of [ANA q, PEDRO: Sim., RUI c] -> idx 1,4,7 become foreign 'PEDRO — Sim.'. Same for 4 rounds of MARIA: Não. at gap 4.", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/scripts (_header_like author regex, server.py L308)", "issue": "The regex r'^(de|por|texto de|by)\\s+...' is case-sensitive, so 'Texto de João Silva' / 'De João Silva' / 'Por ...' never match. A running author footer next to page numbers ('- 1 -' on separate blank-line-delimited lines) stays as a direction; only the page numbers are marked. Fix: add re.I to the prefix, e.g. (?i:de|por|texto de|by)."},
+      {"endpoint": "parser (heuristic)", "issue": "Footer and page-number lines that are NOT separated by blank lines get merged into the previous speech: 'RUI: Mais texto 1.\\nTexto de João Silva\\n- 1 -' -> RUI text 'Mais texto 1. Texto de João Silva - 1 -'. Page numbers inside speech are then never detected. PDFs often produce exactly this layout."},
+      {"endpoint": "tests/test_ensaio_round7.py::TestSettings", "issue": "Stale hardcoded last4 values (d7ba/62c7) and tts_primary=='edge'. The user has since saved app keys (ff29/ba39), so 3 tests fail. These are test-data problems, not app bugs. The test also PUTs bogus keys; this did not change the saved keys (verified)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_round9.py", "/app/backend/e1_tests/test_tscheck_settings_nonbelong.py", "/app/test_reports/pytest/round9.xml"],
+  "action_items": [
+    "mark_non_script: never mark kind=='dialogue' lines through the header path. At minimum, run _header_like on ln.text only, not on the 'NAME — text' string with its built-in em dash. Also require near_break for dialogue; _regular alone is not enough. Re-run tests/test_ensaio_round9.py::test_pedro_sim_regular and ::test_maria_nao_regular.",
+    "_header_like author regex: make the 'de|por|texto de|by' prefix case-insensitive so 'Texto de João Silva' footers next to page numbers are marked (test_footer_near_page_numbers).",
+    "Optional: in the parser, split standalone page-number or footer lines out of speech continuation (e.g. a line matching RE_PAGE should never be merged into the previous dialogue).",
+    "Update tests/test_ensaio_round7.py::TestSettings to stop hardcoding last4 and to stop PUTting bogus keys (use /validate instead)."
+  ],
+  "critical_code_review_comments": [
+    "server.py L325: full = f\"{ln.character} — {ln.text}\" is then passed to _header_like, which matches '—' through RE_HEADER_WORD, so every repeated dialogue line counts as header-like. This is the RCA for the open bug.",
+    "_regular() treats 3 occurrences with equal gaps as positional evidence. Regular spacing is normal in short dialogue scenes, so it should only count for direction-type lines that are also header-like.",
+    "server.py is 1555 lines and should be split into modules."
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_round9.py"],
+  "success_rate": {"backend": "82% (14/17 in the targeted run)", "frontend": "100%"},
+  "seed_data_creation": "Created TEST_r9-* and TEST_probe scripts; all deleted afterwards. No keys were modified. POST /settings/keys/elevenlabs/check was called once, which re-validates the existing key only.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Settings route is /definicoes (not /settings). Active rehearsal session for 'A Espera': /ensaio/6ae33142b87e1872e1f2eb79 has exactly one data-current='true' (script-line-11). /texto/:id has no current line (all 'false'), which is fine. Saved keys: elevenlabs …ba39, deepgram …ff29, gemini …dUOA (source app). Run tests/test_ensaio_round9.py for the false-positive probes.",
+  "rca of the issue": "Repro: POST /api/scripts with text 'ANA: Vens comigo à feira número 0?\\nPEDRO: Sim.\\nRUI: Eu também vou, na vez 0.' repeated 3 times (i=0..2). Result: lines 1, 4 and 7 become kind=foreign with text 'PEDRO — Sim.' and character=None. Cause: the dialogue group string contains '—', so _header_like is True; the occurrences are at positions 1, 4, 7 (gaps 3, 3), so _regular is True; headers.update marks them. The e1 test passes only because its PEDRO lines are irregularly spaced. Mitigation: exclude dialogue from header detection, or evaluate _header_like on the raw text and require near_break."
+}

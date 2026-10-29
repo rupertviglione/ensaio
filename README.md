@@ -59,3 +59,8 @@ Abre http://localhost:3000 (o microfone funciona em `localhost` sem HTTPS). Usa 
 ## Tecnologia
 FastAPI + MongoDB + React. IA: Claude Sonnet 5.5 / Haiku 5.5 (avaliação, confirmação de diferenças e resumo, chave universal Emergent); escuta Deepgram nova-3 (principal), Gemini Live (reserva), Web Speech (último recurso); vozes Microsoft Edge pt-PT (edge-tts), OpenAI gpt-4o-mini-tts como reserva, ElevenLabs opcional.
 Teste automático de leitura correcta (áudio sintetizado → STT real → relatório): `cd backend && python tests/readthrough_phase2.py deepgram MARTA` (ou `gemini JOÃO`).
+Teste no browser real (Chromium, UI completa, microfone simulado): `cd tests/e2e && python browser_readthrough.py fakemic` e `python browser_readthrough.py read deepgram|gemini clean|distorted "A Espera" MARTA`.
+
+**Definições** (cabeçalho → Definições): chaves ElevenLabs, Deepgram e Gemini podem ser coladas na app; são validadas, guardadas no servidor (MongoDB) e têm prioridade sobre o `backend/.env`. O browser só vê os últimos 4 caracteres. Com uma chave ElevenLabs válida (Text to Speech), o ElevenLabs passa a ser a voz principal (uma voz pt-PT diferente por personagem) e o Edge fica como reserva.
+**Escuta Deepgram**: o browser liga-se a `wss://<backend>/api/stt/deepgram` (proxy no backend, a chave nunca sai do servidor); se o proxy falhar, liga directamente com token temporário.
+**Pronúncia** (separador por texto): palavras/nomes escritos na forma estrangeira são detectados pelo Claude (língua, grafia para a voz, variantes que a escuta pode ouvir); editáveis. Aplicadas às vozes, às keyterms do Deepgram e à comparação. Palavras já escritas em português ("Nova Iorque") dizem-se em português.

@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form  # noqa: E402
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, WebSocket  # noqa: E402
+import websockets  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from starlette.middleware.cors import CORSMiddleware  # noqa: E402
 from motor.motor_asyncio import AsyncIOMotorClient  # noqa: E402
@@ -28,7 +29,9 @@ from emergentintegrations.llm.openai import OpenAITextToSpeech, OpenAISpeechToTe
 import eleven  # noqa: E402
 import edge_voices  # noqa: E402
 import speech  # noqa: E402
-from matching import norm_tokens, local_match, fast_verdict, final_accuracy, NEGATIONS  # noqa: E402
+import keys  # noqa: E402
+import pronounce  # noqa: E402
+from matching import norm_tokens, local_match, fast_verdict, final_accuracy  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ensaio")
@@ -94,7 +97,7 @@ class Character(BaseModel):
     style: str = ""
     el_voice_id: Optional[str] = None
     el_voice_name: str = ""
-    tts: Literal["edge", "openai", "elevenlabs"] = "edge"
+    tts: Literal["auto", "edge", "openai", "elevenlabs"] = "auto"
     edge_voice: str = ""
     edge_pitch: int = Field(0, ge=-50, le=50)
     edge_rate: int = Field(0, ge=-50, le=50)
@@ -115,6 +118,10 @@ class Script(BaseDocument):
     characters: List[Character] = []
     lines: List[Line] = []
     memory: List[MemoryNote] = []
+    foreign: List[dict] = []
+    foreign_hash: str = ""
+    auto_marked: List[str] = []
+    auto_marked_dismissed: bool = False
     created_at: str = Field(default_factory=now)
     last_rehearsal: Optional[str] = None
     last_score: Optional[float] = None
@@ -283,6 +290,69 @@ async def build_structure(text: str):
     return lines, chars
 
 
+RE_PAGE = re.compile(r"^\s*[-–—(\[]?\s*(p[áa]g(ina)?\.?\s*)?\d{1,4}(\s*(/|de)\s*\d{1,4})?\s*[-–—)\]]?\s*$", re.I)
+
+
+RE_HEADER_WORD = re.compile(r"\b(acto|ato|act|cena|quadro|parte)\b|[—–]|\s-\s", re.I)
+
+
+def _printer_mark(t: str) -> bool:
+    return not re.search(r"[A-Za-zÀ-ÿ]", t) and len(t) <= 20 and not t.startswith("(")
+
+
+def _header_like(t: str, title: str) -> bool:
+    letters = re.sub(r"[^A-Za-zÀ-ÿ]", "", t)
+    upper = len(letters) >= 3 and letters == letters.upper()
+    fold = lambda x: re.sub(r"\W+", " ", x.lower()).strip()  # noqa: E731
+    titled = len(fold(title)) >= 4 and fold(title) in fold(t)
+    author = bool(re.match(r"^(?i:de|por|texto de|by)\s+[A-ZÀ-Ý][\w'-]+(\s+[A-ZÀ-Ý][\w'-]+)+\s*$", t))
+    return upper or titled or author or bool(RE_HEADER_WORD.search(t))
+
+
+def _regular(pos: list) -> bool:
+    gaps = [b - a for a, b in zip(pos, pos[1:])]
+    return min(gaps) >= 3 and max(gaps) <= 2 * min(gaps)
+
+
+def mark_non_script(lines: List[Line], title: str = "") -> List[str]:
+    """Post-pass after parsing: page numbers, running headers/footers and printer marks → "foreign"."""
+    page_at = [i for i, ln in enumerate(lines) if ln.kind == "direction" and (RE_PAGE.match(ln.text.strip()) or _printer_mark(ln.text.strip()))]
+    near_page = lambda i: any(abs(i - p) <= 2 for p in page_at)  # noqa: E731
+    near_break = lambda i: i <= 1 or i >= len(lines) - 2 or near_page(i)  # noqa: E731
+    groups: dict = {}
+    for i, ln in enumerate(lines):
+        if ln.kind == "dialogue":
+            # never digit-fold a character's line: only exact repeats of the whole "NAME — text" count
+            full, k = f"{ln.character} — {ln.text.strip()}", ("d", ln.character, ln.text.strip().lower())
+        elif ln.kind == "direction" and not ln.text.strip().startswith("("):
+            full, k = ln.text.strip(), ("s", re.sub(r"\d+", "#", ln.text.strip().lower()))
+        else:
+            continue
+        if len(full) <= 80:
+            groups.setdefault(k, []).append((i, ln.text.strip()))
+    headers = set()
+    for k, occ in groups.items():
+        pos = [i for i, _ in occ]
+        if len(occ) < 3 or not _header_like(occ[0][1], title):
+            continue
+        near = sum(map(near_break, pos)) * 2 >= len(pos)
+        # a character's line needs page-number evidence; edges or regular spacing alone are normal back-and-forth
+        positional = sum(map(near_page, pos)) * 2 >= len(pos) if k[0] == "d" else near or _regular(pos)
+        if positional:
+            headers.update(pos)
+    marked = []
+    for i, ln in enumerate(lines):
+        t = ln.text.strip()
+        if i in headers:
+            if ln.kind == "dialogue":
+                ln.text, ln.character = f"{ln.character} — {t}", None
+        elif not (ln.kind == "direction" and (RE_PAGE.match(t) or _printer_mark(t))):
+            continue
+        ln.kind = "foreign"
+        marked.append(ln.uid)
+    return marked
+
+
 # ---------- Text extraction ----------
 def extract_text(filename: str, data: bytes) -> str:
     name = filename.lower()
@@ -344,6 +414,7 @@ class TTSIn(BaseModel):
     edge_voice: Optional[str] = None
     edge_pitch: int = 0
     edge_rate: int = 0
+    script_id: Optional[str] = None
 
 
 class SessionIn(BaseModel):
@@ -393,11 +464,14 @@ def script_out(script: Script) -> dict:
         m = em.get(ln["uid"])
         ln["edited_text"] = m.new_text if m else None
         ln["edit_note_id"] = m.id if m else None
+        ln["keyterms"] = pronounce.line_keyterms(ln["edited_text"] or ln["text"], script.foreign) if ln["kind"] == "dialogue" else []
     return d
 
 
 async def save_characters(script: Script):
     await db.scripts.update_one({"_id": oid(script.id)}, {"$set": {"characters": [c.model_dump() for c in script.characters]}})
+    if script.id:
+        asyncio.create_task(prepare_audio(script))  # voices changed → re-pre-generate every line
 
 
 LINK_SYSTEM = """Recebes as falas numeradas de um texto de teatro e uma nota de ensaio (alteração acordada). PT-PT.
@@ -468,9 +542,13 @@ async def create_script(body: ScriptIn):
     if not any(ln.kind == "dialogue" for ln in lines):
         raise HTTPException(422, "Não consegui identificar falas e personagens neste texto.")
     s = Script(title=body.title.strip() or "Sem título", author=body.author, raw_text=body.text, lines=lines, characters=chars)
+    s.auto_marked = mark_non_script(s.lines, s.title)
+    s.characters = [c for c in s.characters if any(ln.kind == "dialogue" and ln.character == c.name for ln in s.lines)]
     assign_edge(s)
+    assign_eleven(s)
     res = await db.scripts.insert_one(s.to_mongo())
     s.id = str(res.inserted_id)
+    spawn_foreign(s)
     return script_out(s)
 
 
@@ -507,6 +585,7 @@ async def save_lines(script: Script, lines: List[Line]) -> dict:
     await db.scripts.update_one({"_id": oid(script.id)}, {"$set": {
         "lines": [ln.model_dump() for ln in lines], "characters": [c.model_dump() for c in chars],
         "memory": [m.model_dump() for m in script.memory]}})
+    spawn_foreign(script)
     return script_out(script)
 
 
@@ -545,6 +624,13 @@ async def patch_line(script_id: str, uid: str, body: LinePatch):
     return await save_lines(script, lines)
 
 
+@api.post("/scripts/{script_id}/auto-marked/dismiss")
+async def dismiss_auto_marked(script_id: str):
+    await get_script(script_id)
+    await db.scripts.update_one({"_id": oid(script_id)}, {"$set": {"auto_marked_dismissed": True}})
+    return script_out(await get_script(script_id))
+
+
 @api.post("/scripts/{script_id}/rename-character")
 async def rename_character(script_id: str, body: RenameIn):
     script = await get_script(script_id)
@@ -576,7 +662,10 @@ async def update_script(script_id: str, body: ScriptUpdate):
     upd = body.model_dump(exclude_none=True)
     if upd:
         await db.scripts.update_one({"_id": oid(script_id)}, {"$set": upd})
-    return script_out(await get_script(script_id))
+    out = await get_script(script_id)
+    if body.characters:
+        asyncio.create_task(prepare_audio(out))  # TTS settings changed → re-pre-generate every line
+    return script_out(out)
 
 
 @api.delete("/scripts/{script_id}")
@@ -629,6 +718,7 @@ PREMADE_IDS = {
     "onwK4e9ZLuTAKqWVaz9q",
 }
 TTS_STATS = {"edge": 0, "elevenlabs": 0, "openai_fallback": 0, "fallback_reasons": []}
+EL_BLOCKED: set = set()  # voices the account's plan refuses (402); skipped until the key changes
 
 
 def tts_instructions(character: Optional[str], style: str) -> str:
@@ -660,9 +750,15 @@ async def _generate_openai(text: str, voice: str, instructions: str) -> bytes:
     return b"".join(await asyncio.gather(*[one(p) for p in eleven.split_text(text, 1500)]))
 
 
+def tts_primary() -> str:
+    # User decision: Edge is the primary voice; ElevenLabs only when chosen manually for a character.
+    return "edge"
+
+
 def tts_cfg(c: Optional[Character]) -> dict:
     if c is None:
-        return {"character": None, "voice": PROMPTER_VOICE, "style": "", "tts": "edge", "el_voice_id": None, **edge_voices.PROMPTER}
+        pv = (CATALOG.get("prompter") or {}).get("id")
+        return {"character": None, "voice": PROMPTER_VOICE, "style": "", "tts": "auto", "el_voice_id": pv, **edge_voices.PROMPTER}
     return {"character": c.name, "voice": c.voice, "style": c.style, "tts": c.tts, "el_voice_id": c.el_voice_id,
             "edge_voice": c.edge_voice or edge_voices.VOICES[0]["id"], "edge_pitch": c.edge_pitch, "edge_rate": c.edge_rate}
 
@@ -677,41 +773,70 @@ def _cached(path: Path, gen):
     return run
 
 
-async def _synth_job(text: str, cfg: dict) -> tuple:
-    h = lambda *p: hashlib.sha256("|".join(map(str, (text,) + p)).encode()).hexdigest()  # noqa: E731
-    vid = None if cfg["el_voice_id"] in PREMADE_IDS else cfg["el_voice_id"]
-    instructions = tts_instructions(cfg["character"], cfg["style"])
-    voice = cfg["voice"] if cfg["voice"] in VOICES else PROMPTER_VOICE
+def _h(text: str, *p) -> str:
+    return hashlib.sha256("|".join(map(str, (text,) + p)).encode()).hexdigest()
+
+
+def _tts_edge(text: str, cfg: dict):
     ev, ep, er = cfg["edge_voice"], cfg["edge_pitch"], cfg["edge_rate"]
-    openai = (_cached(TTS_CACHE / f"oa_{h(voice, 'gpt-4o-mini-tts', 'mp3', instructions)}.mp3",
-                      lambda: _generate_openai(text, voice, instructions)), "openai", voice)
-    edge = (_cached(TTS_CACHE / f"ed_{h(ev, ep, er)}.mp3", lambda: edge_voices.synth(text, ev, ep, er)), "edge", f"{ev} {ep:+d}Hz {er:+d}%")
-    chain = [openai] if cfg["tts"] == "openai" else [edge, openai]
-    if cfg["tts"] == "elevenlabs" and vid and eleven.can("tts"):
-        chain.insert(0, (_cached(TTS_CACHE / f"el_{h('el', vid, eleven.TTS_MODEL)}.mp3", lambda: eleven.synth(text, vid)), "elevenlabs", vid))
-    reason = ""
-    for i, (run, provider, label) in enumerate(chain):
-        if provider == "openai" and i:
-            log.warning("TTS FALLBACK OpenAI (%s) voz=%s texto=%r", reason, voice, text[:60])
-            TTS_STATS["openai_fallback"] += 1
+    return TTS_CACHE / f"ed_{_h(text, ev, ep, er)}.mp3", lambda: edge_voices.synth(text, ev, ep, er), f"{ev} {ep:+d}Hz {er:+d}%"
+
+
+def _tts_eleven(text: str, cfg: dict):
+    vid = cfg.get("el_voice_id")
+    if not vid or vid in PREMADE_IDS or vid in EL_BLOCKED or not eleven.can("tts"):
+        return None
+    return TTS_CACHE / f"el_{_h(text, 'el', vid, eleven.TTS_MODEL)}.mp3", lambda: eleven.synth(text, vid), vid
+
+
+def _tts_openai(text: str, cfg: dict):
+    voice = cfg["voice"] if cfg["voice"] in VOICES else PROMPTER_VOICE
+    instructions = tts_instructions(cfg["character"], cfg["style"])
+
+    async def gen():
+        async with TTS_SEM:
+            return await _generate_openai(text, voice, instructions)
+    return TTS_CACHE / f"oa_{_h(text, voice, 'gpt-4o-mini-tts', 'mp3', instructions)}.mp3", gen, voice
+
+
+# Pluggable TTS: name -> builder(text, cfg) returning (cache path, generator, label) or None when unavailable.
+TTS_PROVIDERS = {"elevenlabs": _tts_eleven, "edge": _tts_edge, "openai": _tts_openai}
+
+
+def tts_chain(cfg: dict) -> list:
+    pref = cfg.get("tts") or "auto"
+    if pref == "openai":
+        return ["openai"]
+    first = tts_primary() if pref == "auto" else pref
+    return list(dict.fromkeys([first, "edge", "openai"]))
+
+
+async def _synth_job(text: str, cfg: dict) -> tuple:
+    reason, tried = "", 0
+    for provider in tts_chain(cfg):
+        built = TTS_PROVIDERS[provider](text, cfg)
+        if not built:
+            continue
+        path, gen, label = built
+        if tried:
+            log.warning("TTS FALLBACK %s (%s) texto=%r", provider, reason, text[:60])
+            TTS_STATS["openai_fallback" if provider == "openai" else "fallbacks"] = TTS_STATS.get("openai_fallback" if provider == "openai" else "fallbacks", 0) + 1
             TTS_STATS["fallback_reasons"] = (TTS_STATS["fallback_reasons"] + [reason])[-20:]
+        tried += 1
         try:
-            if provider == "openai":
-                async with TTS_SEM:
-                    audio = await run()
-            else:
-                audio = await run()
-            if provider != "openai":
-                TTS_STATS[provider] += 1
+            audio = await _cached(path, gen)()
+            TTS_STATS[provider] = TTS_STATS.get(provider, 0) + 1
             return audio, provider, label
         except Exception as e:
             reason = f"{provider}: {str(e)[:160]}"
             log.warning("TTS %s falhou: %s", provider, reason)
+            if provider == "elevenlabs" and "402" in reason:
+                EL_BLOCKED.add(cfg.get("el_voice_id"))
     raise HTTPException(502, "Não consegui gerar a voz.")
 
 
-async def synth(text: str, cfg: dict) -> tuple:
-    text = clean_for_tts(text)
+async def synth(text: str, cfg: dict, foreign: Optional[list] = None) -> tuple:
+    text = pronounce.say_text(foreign or [], clean_for_tts(text))
     if not text:
         raise HTTPException(400, "Texto vazio")
     key = hashlib.sha256(json.dumps([text, cfg], sort_keys=True).encode()).hexdigest()
@@ -725,18 +850,32 @@ async def synth(text: str, cfg: dict) -> tuple:
     return await asyncio.shield(TTS_INFLIGHT[key])
 
 
-async def prepare_audio(script: Script, character: str, start_idx: int):
+async def prepare_audio(script: Script, character: Optional[str] = None, start_idx: int = 0):
+    """Pre-generates every AI line (start point first) so playback never waits on synthesis."""
     voices = {c.name: c for c in script.characters}
     order = script.lines[start_idx:] + script.lines[:start_idx]
     ai = [ln for ln in order if ln.kind == "dialogue" and ln.character != character and ln.character in voices]
     t0 = time.perf_counter()
-    res = await asyncio.gather(*[synth(effective_text(script, ln), tts_cfg(voices[ln.character])) for ln in ai], return_exceptions=True)
-    hints = {hint_text(effective_text(script, ln)) for ln in order if ln.kind == "dialogue" and ln.character == character}
+    # never hold audio back for the pronunciation pass: generate now, regenerate only if respellings change
+    detect = None if script.foreign_hash == foreign_hash(script) else asyncio.ensure_future(ensure_foreign(script))
+    before = list(script.foreign or [])
+    gen = lambda fr: asyncio.gather(*[synth(effective_text(script, ln), tts_cfg(voices[ln.character]), fr) for ln in ai], return_exceptions=True)  # noqa: E731
+    res = await gen(before)
+    hints = {hint_text(effective_text(script, ln)) for ln in order if character and ln.kind == "dialogue" and ln.character == character}
     await asyncio.gather(*[synth(h, tts_cfg(None)) for h in hints if h], return_exceptions=True)
     fails = [r for r in res if isinstance(r, Exception)]
     providers = [r[1] for r in res if isinstance(r, tuple)]
-    log.info("pré-geração: %s falas IA (%s falhas, %s Edge, %s OpenAI) + %s dicas em %.1fs", len(ai), len(fails),
-             providers.count("edge"), providers.count("openai"), len(hints), time.perf_counter() - t0)
+    log.info("pré-geração: %s falas IA (%s falhas, %s ElevenLabs, %s Edge, %s OpenAI) + %s dicas em %.1fs", len(ai), len(fails),
+             providers.count("elevenlabs"), providers.count("edge"), providers.count("openai"), len(hints), time.perf_counter() - t0)
+    if detect:
+        try:
+            after = await detect
+        except Exception as e:
+            log.warning("detecção de pronúncia falhou: %s", e)
+            return
+        if after != before:
+            await gen(after)
+            log.info("pré-geração refeita com %s palavras estrangeiras", len(after))
 
 
 def guess_female(name: str) -> bool:
@@ -759,26 +898,64 @@ def assign_edge(script: Script, force: bool = False) -> bool:
     return changed
 
 
+def assign_eleven(script: Script, force: bool = False) -> bool:
+    """Distinct native pt-PT ElevenLabs voice per character (only when ElevenLabs is the primary TTS)."""
+    if tts_primary() != "elevenlabs" or not CATALOG["voices"]:
+        return False
+    ids = {v["id"] for v in CATALOG["voices"]}
+    used = set() if force else {c.el_voice_id for c in script.characters if c.el_voice_id in ids}
+    changed = False
+    for c in script.characters:
+        if not force and c.el_voice_id in ids:
+            continue
+        g = "female" if guess_female(c.name) else "male"
+        pool = [v for v in CATALOG["voices"] if v["gender"] == g] + [v for v in CATALOG["voices"] if v["gender"] != g]
+        v = next((x for x in pool if x["id"] not in used), pool[len(used) % len(pool)])
+        c.el_voice_id, c.el_voice_name = v["id"], v["name"]
+        used.add(v["id"])
+        changed = True
+    return changed
+
+
+async def eleven_ready(probe: bool = True):
+    EL_BLOCKED.clear()
+    if not eleven.KEY:
+        return
+    if probe:  # probing spends credit (TTS + STT): only on key save/check or when a character uses ElevenLabs
+        await eleven.check_status(force=True)
+    doc = await db.voice_catalog.find_one({"_id": "pt-PT"})
+    cat = doc if doc and doc.get("voices") else eleven.seed_catalog()
+    CATALOG.update(voices=cat["voices"], prompter=cat.get("prompter"), source=cat.get("source", "seed"))
+    if tts_primary() == "elevenlabs":
+        async for d in db.scripts.find({}):
+            sc = Script.from_mongo(d)
+            if assign_eleven(sc):
+                await save_characters(sc)
+    log.info("ElevenLabs: válida=%s, TTS principal=%s", eleven.STATUS.get("valid"), tts_primary())
+
+
 async def voices_bootstrap():
     await edge_voices.refresh_voices()
+    mig = await db.settings.find_one({"_id": "migrations"}) or {}
     n = 0
     async for d in db.scripts.find({}):
         s = Script.from_mongo(d)
-        legacy = any("tts" not in c for c in d.get("characters", []))
-        if assign_edge(s) or legacy:
+        changed = assign_edge(s)
+        if not mig.get("tts_auto"):
+            for c in s.characters:
+                if c.tts == "edge":
+                    c.tts, changed = "auto", True
+        if changed:
             await save_characters(s)
             n += 1
+    await db.settings.update_one({"_id": "migrations"}, {"$set": {"tts_auto": True}}, upsert=True)
     log.info("vozes Edge: %s, textos migrados=%s", [v["id"] for v in edge_voices.VOICES], n)
-    doc = await db.voice_catalog.find_one({"_id": "pt-PT"})
-    if doc and doc.get("voices"):
-        CATALOG.update(voices=doc["voices"], prompter=doc.get("prompter"), source=doc.get("source", "api"))
-    elif eleven.KEY:
-        cat = eleven.seed_catalog()
-        CATALOG.update(voices=cat["voices"], prompter=cat["prompter"], source=cat["source"])
+    manual = await db.scripts.count_documents({"characters.tts": "elevenlabs"})
+    await eleven_ready(probe=manual > 0)
 
 
 def voices_info() -> dict:
-    return {"provider": "edge", "edge": edge_voices.VOICES, "prompter": edge_voices.PROMPTER, "openai": VOICES,
+    return {"provider": tts_primary(), "edge": edge_voices.VOICES, "prompter": edge_voices.PROMPTER, "openai": VOICES,
             "elevenlabs": CATALOG["voices"] if eleven.KEY else [], "eleven_configured": bool(eleven.KEY),
             "pt_native": True, "messages": []}
 
@@ -790,7 +967,8 @@ async def list_voices():
 
 @api.get("/tts/status")
 async def tts_status():
-    return {"default": "edge", "edge_voices": edge_voices.VOICES, "prompter": edge_voices.PROMPTER, "stats": TTS_STATS}
+    return {"default": tts_primary(), "providers": list(TTS_PROVIDERS), "edge_voices": edge_voices.VOICES, "prompter": edge_voices.PROMPTER, "stats": TTS_STATS,
+            "eleven_blocked_voices": sorted(v for v in EL_BLOCKED if v)}
 
 
 @api.get("/eleven/status")
@@ -842,7 +1020,9 @@ async def set_eleven_voice(script_id: str, body: ElevenVoiceIn):
     for c in script.characters:
         if c.name == body.character:
             c.el_voice_id, c.el_voice_name = body.voice.get("id") or None, body.voice.get("name", "")
-            c.tts = "elevenlabs" if c.el_voice_id else "edge"
+            c.tts = "elevenlabs" if c.el_voice_id else "auto"
+    if any(c.tts == "elevenlabs" for c in script.characters) and not eleven.STATUS.get("checked_at"):
+        await eleven.check_status()
     await save_characters(script)
     return script_out(script)
 
@@ -851,8 +1031,9 @@ async def set_eleven_voice(script_id: str, body: ElevenVoiceIn):
 async def auto_voices(script_id: str):
     script = await get_script(script_id)
     assign_edge(script, force=True)
+    assign_eleven(script, force=True)
     for c in script.characters:
-        c.tts = "edge"
+        c.tts = "auto"
     await save_characters(script)
     return script_out(script)
 
@@ -860,12 +1041,16 @@ async def auto_voices(script_id: str):
 @api.post("/tts")
 async def tts(body: TTSIn):
     if body.character:
-        cfg = {"character": body.character, "voice": body.voice, "style": body.style, "tts": body.tts or "edge",
+        cfg = {"character": body.character, "voice": body.voice, "style": body.style, "tts": body.tts or "auto",
                "el_voice_id": body.el_voice_id, "edge_voice": body.edge_voice if body.edge_voice in edge_voices.ids() else edge_voices.VOICES[0]["id"],
                "edge_pitch": max(-50, min(50, body.edge_pitch)), "edge_rate": max(-50, min(50, body.edge_rate))}
     else:
         cfg = tts_cfg(None)
-    audio, provider, voice = await synth(body.text, cfg)
+    foreign = None
+    if body.script_id and ObjectId.is_valid(body.script_id):
+        d = await db.scripts.find_one({"_id": ObjectId(body.script_id)}, {"foreign": 1})
+        foreign = (d or {}).get("foreign")
+    audio, provider, voice = await synth(body.text, cfg, foreign)
     return Response(content=audio, media_type="audio/mpeg", headers={
         "Cache-Control": "public, max-age=86400", "X-TTS-Provider": provider, "X-TTS-Voice": voice or ""})
 
@@ -922,7 +1107,7 @@ async def create_session(body: SessionIn):
     script = await get_script(body.script_id)
     if body.character not in [c.name for c in script.characters]:
         raise HTTPException(400, "Personagem inválida")
-    if assign_edge(script):
+    if assign_edge(script) | assign_eleven(script):
         await save_characters(script)
     s = Session(**body.model_dump())
     res = await db.sessions.insert_one(s.to_mongo())
@@ -953,38 +1138,33 @@ Responde APENAS JSON compacto:
 {"kind":"line|note|help|other","accuracy":0-100,"severity":"none|minor|major","interrupt":true|false,"feedback":"uma frase curta falada em PT-PT (se interromperes: o que falhou e o trecho correcto; se note: confirma; se help: as primeiras palavras da fala); vazio se seguir","differences":[{"expected":"","said":"","type":"omissão|troca|acrescento|repetição|salto|inversão"}],"memory_note":"para note: a nota autónoma citando a fala; senão vazio"}"""
 
 
-CONFIRM_SYSTEM = """Revês as diferenças detectadas num ensaio de teatro (PT-PT) entre a fala esperada e o que o reconhecimento automático de voz ouviu.
-O reconhecimento de voz distorce muitas vezes palavras certas: homófonos ou quase-homófonos (à/há, e/é, ou/o), palavras juntas ou separadas (deixei-o / deixeio), pronomes átonos e partículas engolidos (-o, -me, -se, me, o, a, de), contracções e formas coloquiais (tás/estás, pra/para), terminações verbais parecidas, pontuação, números.
-O actor está a dizer um texto que conhece: parte do princípio de que disse bem. Uma palavra curta em falta ou trocada por uma partícula (e, a, o, é, há), ou uma transcrição que deixa a frase agramatical ou sem sentido, é quase sempre erro de reconhecimento, não do actor.
-EXCEPÇÃO: negações e afirmações (não, nunca, nem, nada, ninguém, jamais, sim) acrescentadas, omitidas ou trocadas invertem o sentido — são sempre REAIS.
-Só é REAL quando a transcrição mostra claramente outras palavras com sentido próprio (ex.: "nunca" → "sempre", "casa" → "rua"), uma negação mudada, uma frase/trecho inteiro em falta, ou palavras acrescentadas com sentido.
-Para cada diferença numerada decide se é REAL (o actor mudou, omitiu ou acrescentou palavras de forma que altera o texto ou o sentido) ou se é provavelmente um erro de reconhecimento / variação de pronúncia. Em caso de dúvida, NÃO é real.
-Se o modo for "escrito" não há reconhecimento de voz: só ignora gralhas evidentes.
-Responde APENAS JSON: {"real":[índices das diferenças reais], "notes":{"índice":"comentário curto em PT-PT"}}"""
+CONFIRM_SYSTEM = """Revês diferenças entre o texto que um actor ensaiou (PT-PT) e o que um reconhecimento automático de voz (ASR) transcreveu.
+O ASR é imperfeito: troca palavras raras por palavras comuns ou siglas ("arrota" → "A RTP"), corta finais ("malandreco" → "malandra"), junta e separa palavras, engole partículas e pronomes átonos, confunde homófonos, transcreve nomes estrangeiros de forma aproximada, perde palavras curtas — incluindo "não".
+O actor conhece o texto. A regra por defeito é: a diferença é um ERRO DE RECONHECIMENTO.
+Só é uma ALTERAÇÃO REAL do actor quando, ao mesmo tempo:
+- o que foi ouvido são palavras portuguesas plausíveis que fazem sentido na frase (algo que uma pessoa diria de facto), e
+- são claramente diferentes do esperado no som e no sentido (ex.: "casa" → "rua", "amanhã" → "ontem"), ou falta claramente um trecho longo (várias palavras seguidas), ou foram acrescentadas palavras com sentido próprio.
+Siglas, letras soltas, palavras sem sentido no contexto, frases agramaticais, sons parecidos ou palavras curtas em falta → erro de reconhecimento.
+Negações (não, nunca, nem…): só são reais se o resto da transcrição mostrar claramente que o actor inverteu o sentido; uma negação simplesmente em falta é quase sempre o ASR.
+Se o modo for "escrito" não há ASR: ignora só gralhas evidentes.
+Responde APENAS JSON: {"real":[índices das alterações reais], "notes":{"índice":"comentário curto em PT-PT"}}"""
 CONFIRM_TASKS: dict = {}
-
-
-def strong_difference(d: dict) -> bool:
-    words = f"{d.get('expected', '')} {d.get('said', '')}".split()
-    return len(d.get("expected", "").split()) >= 3 or len(d.get("said", "").split()) >= 3 or any(w in NEGATIONS for w in words)
 
 
 async def confirm_differences(expected: str, said: str, diffs: List[dict], mode: str) -> tuple:
     listing = "\n".join(f"{i}. esperado: \"{d.get('expected', '')}\" → ouvido: \"{d.get('said', '')}\" ({d.get('type', '')})" for i, d in enumerate(diffs))
     prompt = f"Modo: {mode}\nFala esperada: {expected}\nTranscrição: {said}\nDiferenças:\n{listing}"
     try:
-        r = parse_json(await ask_llm(CONFIRM_SYSTEM, prompt, FAST_MODEL))
+        r = parse_json(await ask_llm(CONFIRM_SYSTEM, prompt, LLM_MODEL))
         real = {int(i) for i in r.get("real", []) if str(i).lstrip("-").isdigit()}
         return real, {int(k): v for k, v in (r.get("notes") or {}).items() if str(k).isdigit()}
     except Exception as e:
         log.warning("confirmação de diferenças falhou (%s); a usar regra conservadora", e)
-        return {i for i, d in enumerate(diffs) if strong_difference(d)}, {}
+        return {i for i, d in enumerate(diffs) if len(d.get("expected", "").split()) >= 3}, {}
 
 
 async def confirm_turn(session_id: str, turn: Turn):
     real, notes = await confirm_differences(turn.expected, turn.said, turn.differences, turn.mode)
-    real |= {i for i, d in enumerate(turn.differences)
-             if any(w in NEGATIONS for w in f"{d.get('expected', '')} {d.get('said', '')}".split())}
     for i, d in enumerate(turn.differences):
         d["status"] = "real" if i in real else "discarded"
         if notes.get(i):
@@ -1028,7 +1208,7 @@ async def evaluate_turn(session: Session, script: Script, line_idx: int, said: s
     block = block_lines(script, line_idx, list(line_idxs))
     line = block[0]
     expected = " ".join(effective_text(script, ln) for ln in block)
-    m = local_match(expected, said, 0.9 if session.strictness == "rigor" else 0.75)
+    m = local_match(expected, said, 0.9 if session.strictness == "rigor" else 0.75, pronounce.alias_pairs(script.foreign))
     attribute_lines(script, block, m["differences"])
     exp_tokens = norm_tokens(expected)
     notes = [" ".join(norm_tokens(n.text)) for n in script.memory if not n.new_text]
@@ -1178,6 +1358,174 @@ async def finish_session(session_id: str):
     return (await get_session(session_id)).model_dump()
 
 
+# ---------- Deepgram proxy (browser → backend → Deepgram) ----------
+@api.websocket("/stt/deepgram")
+async def stt_deepgram_ws(ws: WebSocket):
+    await ws.accept()
+
+    async def fail(msg: str, code: int):
+        await ws.send_text(json.dumps({"type": "Error", "message": msg}))
+        await ws.close(code)
+
+    if not speech.DEEPGRAM_KEY:
+        return await fail(speech.missing("Deepgram"), 4003)
+    try:
+        up = await websockets.connect(speech.deepgram_url(ws.query_params.getlist("keyterm")), open_timeout=8, max_size=None,
+                                      additional_headers={"Authorization": f"Token {speech.DEEPGRAM_KEY}"})
+    except Exception as e:
+        code = getattr(getattr(e, "response", None), "status_code", None)
+        log.warning("proxy Deepgram: ligação falhou (%s %s)", code, e)
+        return await fail("Chave Deepgram inválida." if code in (401, 403) else "Sem crédito Deepgram." if code == 402
+                          else f"Deepgram indisponível ({code or type(e).__name__}).", 4002)
+    await ws.send_text(json.dumps({"type": "Ready"}))
+
+    async def upstream():
+        while True:
+            m = await ws.receive()
+            if m["type"] == "websocket.disconnect":
+                return
+            if m.get("bytes"):
+                await up.send(m["bytes"])
+            elif m.get("text"):
+                await up.send(m["text"])
+
+    async def downstream():
+        async for m in up:
+            await ws.send_text(m if isinstance(m, str) else m.decode())
+
+    async def heartbeat():
+        # keeps proxies/ingress from closing the socket while Deepgram is silent
+        while True:
+            await asyncio.sleep(15)
+            await ws.send_text('{"type":"Ping"}')
+
+    tasks = [asyncio.create_task(upstream()), asyncio.create_task(downstream()), asyncio.create_task(heartbeat())]
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for t in tasks:
+        t.cancel()
+    await up.close()
+    try:
+        await ws.close()
+    except Exception:
+        pass
+
+
+# ---------- Definições (chaves) ----------
+class KeyIn(BaseModel):
+    key: str = ""
+
+
+@api.get("/settings/keys")
+async def settings_keys():
+    return {"keys": [keys.public(p) for p in keys.ENV], "tts_primary": tts_primary()}
+
+
+@api.put("/settings/keys/{provider}")
+async def settings_set_key(provider: str, body: KeyIn):
+    if provider not in keys.ENV:
+        raise HTTPException(404, "Motor desconhecido")
+    out = await keys.save(db, provider, body.key)
+    if provider == "elevenlabs":
+        await eleven_ready()
+    return {**out, "tts_primary": tts_primary()}
+
+
+@api.post("/settings/keys/{provider}/check")
+async def settings_check_key(provider: str):
+    if provider not in keys.ENV:
+        raise HTTPException(404, "Motor desconhecido")
+    k = keys.current(provider)
+    if k:
+        keys.STATUS[provider] = await keys.validate(provider, k)
+        if provider == "elevenlabs":
+            await eleven_ready()
+    return {**keys.public(provider), "tts_primary": tts_primary()}
+
+
+@api.post("/settings/keys/{provider}/validate")
+async def settings_validate_key(provider: str, body: KeyIn):
+    """Dry run: validates a candidate key without saving it or touching the key in use."""
+    if provider not in keys.ENV:
+        raise HTTPException(404, "Motor desconhecido")
+    if not body.key.strip():
+        raise HTTPException(400, "Chave vazia.")
+    return {"provider": provider, "saved": False, "attempt": await keys.validate(provider, body.key.strip())}
+
+
+# ---------- Pronúncia (palavras estrangeiras) ----------
+FOREIGN_TASKS: dict = {}
+
+
+def foreign_hash(script: Script) -> str:
+    return hashlib.sha256("\n".join(effective_text(script, ln) for ln in script.lines if ln.kind == "dialogue").encode()).hexdigest()[:16]
+
+
+async def ensure_foreign(script: Script, force: bool = False) -> list:
+    h = foreign_hash(script)
+    if not force and script.foreign_hash == h:
+        return script.foreign
+    if script.id in FOREIGN_TASKS and not force:
+        return await FOREIGN_TASKS[script.id]
+
+    async def run():
+        text = "\n".join(f"{ln.character}: {effective_text(script, ln)}" for ln in script.lines if ln.kind == "dialogue")[:16000]
+        found = pronounce.clean_items(parse_json(await asyncio.wait_for(ask_llm(pronounce.FOREIGN_SYSTEM, text), 90)).get("items"))
+        body = pronounce.fold(text)
+        keep = [it for it in script.foreign if pronounce.fold(it["text"]) in body]
+        known = {pronounce.fold(it["text"]) for it in keep}
+        items = keep + [it for it in found if pronounce.fold(it["text"]) not in known and pronounce.fold(it["text"]) in body]
+        await db.scripts.update_one({"_id": oid(script.id)}, {"$set": {"foreign": items, "foreign_hash": h}})
+        script.foreign, script.foreign_hash = items, h
+        log.info("pronúncia: %s palavras estrangeiras em %r", len(items), script.title)
+        return items
+
+    FOREIGN_TASKS[script.id] = asyncio.ensure_future(run())
+    try:
+        return await FOREIGN_TASKS[script.id]
+    finally:
+        FOREIGN_TASKS.pop(script.id, None)
+
+
+def spawn_foreign(script: Script):
+    async def go():
+        try:
+            await ensure_foreign(script)
+        except Exception as e:
+            log.warning("detecção de pronúncia falhou: %s", e)
+    asyncio.create_task(go())
+
+
+class ForeignIn(BaseModel):
+    items: List[dict]
+
+
+@api.get("/scripts/{script_id}/pronunciation")
+async def get_pronunciation(script_id: str):
+    script = await get_script(script_id)
+    return {"items": script.foreign, "detected": script.foreign_hash == foreign_hash(script)}
+
+
+@api.put("/scripts/{script_id}/pronunciation")
+async def put_pronunciation(script_id: str, body: ForeignIn):
+    script = await get_script(script_id)
+    items = pronounce.clean_items(body.items)
+    await db.scripts.update_one({"_id": oid(script_id)}, {"$set": {"foreign": items, "foreign_hash": foreign_hash(script)}})
+    script.foreign = items
+    asyncio.create_task(prepare_audio(script))
+    return {"items": items, "detected": True}
+
+
+@api.post("/scripts/{script_id}/pronunciation/detect")
+async def detect_pronunciation(script_id: str):
+    script = await get_script(script_id)
+    try:
+        items = await ensure_foreign(script, force=True)
+    except Exception as e:
+        log.warning("detecção de pronúncia falhou: %s", e)
+        raise HTTPException(502, "Não consegui detectar as palavras estrangeiras. Tenta outra vez.")
+    return {"items": items, "detected": True}
+
+
 DEMO_TEXT = """Cena única. Uma estação de comboios, ao fim da tarde.
 
 (MARTA está sentada num banco. Entra JOÃO, com uma mala.)
@@ -1210,6 +1558,7 @@ async def seed():
         lines, chars = await build_structure(DEMO_TEXT)
         s = Script(title="A Espera", author="Cena de demonstração", raw_text=DEMO_TEXT, lines=lines, characters=chars)
         await db.scripts.insert_one(s.to_mongo())
+    await keys.load(db)
     asyncio.create_task(voices_bootstrap())
 
 

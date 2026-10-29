@@ -2,7 +2,7 @@ import { normTokens, similar } from "./match";
 
 export const cleanForTts = (t) => (t || "").replace(/\([^)]*\)/g, "").replace(/[*_#>~|[\]]/g, "").replace(/\s+/g, " ").trim();
 export const splitWords = (t) => (t || "").split(/\s+/).filter(Boolean);
-const wordNorm = (w) => normTokens(w).join("");
+export const wordNorm = (w) => normTokens(w).join("");
 
 // Drops words that are the speaker/prompter audio leaking into the mic.
 export function removeEcho(words, ref) {

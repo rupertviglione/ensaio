@@ -1,5 +1,5 @@
 import { Link, NavLink } from "react-router-dom";
-import { Plus, Library, Drama } from "lucide-react";
+import { Plus, Library, Drama, Settings } from "lucide-react";
 
 const navCls = ({ isActive }) =>
   `flex items-center gap-2 px-4 py-2 rounded-full text-sm transition-colors duration-200 ${
@@ -19,6 +19,9 @@ export const Header = () => (
         </NavLink>
         <NavLink to="/novo" className={navCls} data-testid="nav-new-script">
           <Plus className="w-4 h-4" /> <span className="hidden sm:inline">Novo texto</span>
+        </NavLink>
+        <NavLink to="/definicoes" className={navCls} data-testid="nav-settings">
+          <Settings className="w-4 h-4" /> <span className="hidden sm:inline">Definições</span>
         </NavLink>
       </nav>
     </div>

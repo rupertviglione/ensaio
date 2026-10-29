@@ -46,8 +46,46 @@ async def deepgram_token() -> dict:
         log.warning("Deepgram grant %s: %s", r.status_code, r.text[:200])
         raise HTTPException(503, f"Deepgram indisponível ({r.status_code}).")
     params = {"model": DEEPGRAM_MODEL, "language": "pt-PT", "encoding": "linear16", "sample_rate": 16000, "channels": 1,
-              "interim_results": "true", "punctuate": "true", "smart_format": "false", "endpointing": 400}
+              "interim_results": "true", "punctuate": "true", "smart_format": "false", "endpointing": 300}
     return {"token": r.json()["access_token"], "url": DEEPGRAM_URL, "params": params}
+
+
+DEEPGRAM_PARAMS = {"model": DEEPGRAM_MODEL, "language": "pt-PT", "encoding": "linear16", "sample_rate": 16000, "channels": 1,
+                   "interim_results": "true", "punctuate": "true", "smart_format": "false", "endpointing": 300}
+
+
+def deepgram_url(keyterms: list) -> str:
+    q = list(DEEPGRAM_PARAMS.items()) + [("keyterm", k[:80]) for k in keyterms[:100] if k.strip()]
+    return f"{DEEPGRAM_URL}?{httpx.QueryParams(q)}"
+
+
+async def validate_deepgram(key: str) -> dict:
+    async with httpx.AsyncClient(timeout=10, headers={"Authorization": f"Token {key}"}) as c:
+        r = await c.get("https://api.deepgram.com/v1/projects")
+        if r.status_code in (401, 403):
+            return {"valid": False, "message": "Chave Deepgram inválida."}
+        r.raise_for_status()
+        out = {"valid": True, "message": "Chave Deepgram válida."}
+        projects = r.json().get("projects") or []
+        if projects:
+            b = await c.get(f"https://api.deepgram.com/v1/projects/{projects[0]['project_id']}/balances")
+            if b.status_code == 200 and b.json().get("balances"):
+                bal = b.json()["balances"][0]
+                out["balance"] = f"{bal.get('amount', 0):.2f} {bal.get('units', 'usd').upper()}"
+            elif b.status_code in (401, 403):
+                out["balance_error"] = "sem permissão para ler o saldo (billing:read)"
+        return out
+
+
+async def validate_gemini(key: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get("https://generativelanguage.googleapis.com/v1beta/models", params={"pageSize": 200}, headers={"x-goog-api-key": key})
+    if r.status_code in (400, 401, 403):
+        return {"valid": False, "message": "Chave Gemini inválida."}
+    r.raise_for_status()
+    names = [m["name"] for m in r.json().get("models", [])]
+    live = f"models/{GEMINI_LIVE_MODEL}" in names
+    return {"valid": True, "message": "Chave Gemini válida." + ("" if live else f" Modelo {GEMINI_LIVE_MODEL} não disponível."), "live_model": live}
 
 
 async def gemini_token() -> dict:

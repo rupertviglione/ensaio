@@ -4,14 +4,14 @@ import { Pause, Play, SkipBack, SkipForward, Lightbulb, Flag, Mic, MicOff, Volum
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { api, errMsg, voiceBody } from "@/lib/api";
-import { playUrl, stopAudio, audioProgress } from "@/lib/audio";
-import { isComplete, localVerdict, normTokens, HELP_RE, NOTE_RE } from "@/lib/match";
-import { TranscriptBuffer, alignPos, cleanForTts, splitWords } from "@/lib/transcript";
+import { playClip, loadClip, unlockAudio, outputLatencyMs, stopAudio, audioProgress } from "@/lib/audio";
+import { isComplete, localVerdict, normTokens, similar, HELP_RE, NOTE_RE } from "@/lib/match";
+import { TranscriptBuffer, alignPos, cleanForTts, splitWords, wordNorm } from "@/lib/transcript";
 import { Listener } from "@/lib/listener";
 import { ScriptView } from "@/components/script/ScriptView";
 import { loadPrefs, savePrefs } from "@/components/script/RehearsalSetup";
 import { LineEditor } from "@/components/rehearsal/LineEditor";
-import { ShortcutsOverlay, ClipWindow, Kbd } from "@/components/rehearsal/Shortcuts";
+import { ShortcutsOverlay, Teleprompter, Kbd } from "@/components/rehearsal/Shortcuts";
 import { MicButton } from "@/components/rehearsal/MicButton";
 import { TextEntry, FeedbackBox, HintBox, EngineBadge } from "@/components/rehearsal/Parts";
 
@@ -48,6 +48,7 @@ export default function Rehearsal() {
   const [showKeys, setShowKeys] = useState(false);
   const [progress, setProgress] = useState(0);
   const [resumeAt, setResumeAt] = useState(null);
+  const [micLost, setMicLost] = useState(null);
   const skipRef = useRef(false);
   const keyRef = useRef(() => {});
   const run = useRef(0);
@@ -121,30 +122,41 @@ export default function Rehearsal() {
     return out;
   };
   const blockText = (b) => b.map((k) => lineText(lines[k])).join(" ");
-  const hintsFrom = (from) => {
+  const firstMine = (from) => {
     let i = from;
     while (i < lines.length && !(lines[i].kind === "dialogue" && lines[i].character === mine)) i = nextOf(i);
-    return i < lines.length ? blockHints(blockText(blockOf(i))) : [];
+    return i < lines.length ? i : -1;
   };
-  const clearFor = (from) => { tb.current.clear(); listener.current?.clear(hintsFrom(from)); };
+  // Recogniser vocabulary: rare words, names and foreign words of the current block and the next one (≤100).
+  const hintsFrom = (from) => {
+    const i = firstMine(from);
+    if (i < 0) return [];
+    const b = blockOf(i);
+    const j = firstMine(nextOf(b[b.length - 1]));
+    const ks = [...b, ...(j >= 0 ? blockOf(j) : [])].flatMap((k) => lines[k].keyterms || []);
+    return [...new Set(ks)].slice(0, 100);
+  };
+  const contextFrom = (from) => { const i = firstMine(from); return i < 0 ? [] : blockHints(blockText(blockOf(i))); };
+  const clearFor = (from) => { tb.current.clear(); return listener.current?.clear(hintsFrom(from), contextFrom(from)); };
 
+  // Cache holds promises of decoded clips, so a cue never waits on the network or on decoding.
   const getAudio = (l) => {
     const k = `${l.uid}|${l.character}|${lineText(l)}`;
     if (!cache.current.has(k)) {
       const c = script.characters.find((x) => x.name === l.character);
-      cache.current.set(k, c ? api.tts({ text: lineText(l), ...voiceBody(c) }).catch(() => null) : Promise.resolve(null));
+      cache.current.set(k, c ? api.tts({ text: lineText(l), ...voiceBody(c, script.id) }).then(loadClip).catch(() => null) : Promise.resolve(null));
     }
     return cache.current.get(k);
   };
   const getPrompter = (text) => {
     const k = `p:${text}`;
-    if (!cache.current.has(k)) cache.current.set(k, api.tts({ text }).catch(() => null));
+    if (!cache.current.has(k)) cache.current.set(k, api.tts({ text }).then(loadClip).catch(() => null));
     return cache.current.get(k);
   };
 
   const prefetch = (from) => {
     let n = 0;
-    for (let i = from; i < lines.length && n < 6; i = nextOf(i)) {
+    for (let i = from; i < lines.length && n < 10; i = nextOf(i)) {
       const l = lines[i];
       if (l.kind !== "dialogue") continue;
       if (l.character !== mine) { if (!skipRef.current || isCue(i)) getAudio(l); }
@@ -174,8 +186,8 @@ export default function Rehearsal() {
 
   const speak = async (text, token) => {
     setPhase("speaking");
-    const url = await getPrompter(text);
-    if (url && token === run.current) await playUrl(url);
+    const clip = await getPrompter(text);
+    if (clip && token === run.current) await playClip(clip);
   };
 
   const handleResult = async (i, r, token) => {
@@ -213,17 +225,26 @@ export default function Rehearsal() {
     const said = stripHelp(tb.current.turnWords().join(" "), t.expected);
     const endAt = performance.now();
     const lastWordAt = tb.current.lastWordAt();
+    const voiceEndAt = listener.current?.lastVoiceAt || lastWordAt;
     stopTurn();
     setHint(null);
     setLastSaid(said);
     if (!said) { toast("Não ouvi nada. Carrega no microfone para tentares outra vez."); return setPhase("waiting"); }
     const after = nextOf(t.block[t.block.length - 1]);
-    clearFor(after);
+    const tail = clearFor(after);
+    // End detected by content but the very last word not heard yet: give the recogniser ~250 ms to deliver it (judged text only).
+    const last = t.words[t.words.length - 1];
+    const missing = reason === "match" && tail && last && !said.split(" ").slice(-3).some((w) => similar(wordNorm(w), wordNorm(last)));
+    const hasLast = (txt) => txt.split(/\s+/).slice(-3).some((w) => similar(wordNorm(w), wordNorm(last)));
+    const judged = missing ? tail(listener.current?.kind === "gemini" ? 1200 : 250, hasLast).then((txt) => extendSaid(said, txt, hasLast)) : Promise.resolve(said);
     const sev = reason === "match" ? localVerdict({ expected: t.expected, said, strictness: session.strictness, memory: script.memory }) : null;
-    if (!sev) return submit(t.i, said, "voz", t.token);
+    if (!sev) return judged.then((j) => { if (j !== said) setLastSaid(j); submit(t.i, j, "voz", t.token); });
     setFeedback(null);
-    pendingLat.current = { line: t.i, endAt, lastWordAt };
-    api.turn(sessionId, { line_idx: t.i, line_idxs: t.block, said, mode: "voz" }).then((r) => {
+    pendingLat.current = { line: t.i, endAt, lastWordAt, voiceEndAt, engine: listener.current?.kind };
+    judged.then((j) => {
+      if (j !== said) { setLastSaid(j); console.info("[ensaio] última palavra chegou depois do fim:", j.slice(said.length).trim()); }
+      return api.turn(sessionId, { line_idx: t.i, line_idxs: t.block, said: j, mode: "voz" });
+    }).then((r) => {
       if (r.memory_note) toast.success("Guardado na memória do texto", { description: r.memory_note.text });
       if (t.token !== run.current) return;
       if (r.advance) { if (r.turn.severity === "major") setFeedback(r.turn); return; }
@@ -251,10 +272,10 @@ export default function Rehearsal() {
     t.prefetched = false;
     setHint(h.text);
     if (prompterVoice) {
-      const url = await getPrompter(h.text);
-      if (url && turn.current === t) {
+      const clip = await getPrompter(h.text);
+      if (clip && turn.current === t) {
         tb.current.echoStart(h.text);
-        await playUrl(url);
+        await playClip(clip);
         tb.current.echoEnd(400);
       }
     }
@@ -272,12 +293,19 @@ export default function Rehearsal() {
     const helps = (norm.match(HELP_RE) || []).length;
     if (helps > t.helps && !(normTokens(t.expected).join(" ").match(HELP_RE) || []).length) { t.helps = helps; giveHint(t); }
     t.note = NOTE_RE.test(norm);
-    if (isComplete(t.expected, stripHelp(text, t.expected))) endTurn("match");
+    if (isComplete(t.expected, stripHelp(text, t.expected))) {
+      // content says "done" but the actor's voice is still going and the last word hasn't arrived: wait for silence
+      const last = t.words[t.words.length - 1];
+      const heardLast = last && text.split(/\s+/).slice(-3).some((w) => similar(wordNorm(w), wordNorm(last)));
+      if (!heardLast && listener.current?.voiced && performance.now() - (t.awaitAt ??= performance.now()) < 600) { t.awaitSilence = true; return; }
+      endTurn("match");
+    }
   };
 
   tickRef.current = () => {
     const t = turn.current;
     if (!t || t.done || t.hinting) return;
+    if (t.awaitSilence && (!listener.current?.voiced || performance.now() - t.awaitAt > 600)) return endTurn("match");
     const silent = performance.now() - Math.max(tb.current.lastChange, t.since);
     if (t.note && silent > 2500) return endTurn("note");
     if (prompterVoice && !t.prefetched && silent > hintMs - 1500) { t.prefetched = true; getPrompter(nextHint(t).text); }
@@ -315,18 +343,19 @@ export default function Rehearsal() {
       setPhase("ai");
       setHint(null);
       prefetch(nextOf(i));
-      const url = await getAudio(l);
+      const clip = await getAudio(l);
       if (token !== run.current) return;
       tb.current.reset();
       tb.current.echoStart(lineText(l), 2500);
-      if (url) {
+      if (clip) {
         const poll = setInterval(() => setProgress(audioProgress()), 200);
-        await playUrl(url, () => {
+        await playClip(clip, () => {
           const p = pendingLat.current;
           if (!p) return;
           pendingLat.current = null;
-          const now = performance.now();
-          lat({ type: "actorEnd→aiStart", line: i, ms_match_to_audio: Math.round(now - p.endAt), ms_lastword_to_audio: Math.round(now - p.lastWordAt) });
+          const now = performance.now() + outputLatencyMs();
+          lat({ type: "actorEnd→aiStart", line: i, engine: p.engine, at: now, ms_voice_to_audio: Math.round(now - p.voiceEndAt),
+            ms_voice_to_detect: Math.round(p.endAt - p.voiceEndAt), ms_match_to_audio: Math.round(now - p.endAt), ms_lastword_to_audio: Math.round(now - p.lastWordAt) });
         });
         clearInterval(poll);
       }
@@ -346,10 +375,16 @@ export default function Rehearsal() {
       onLevel: (v) => setLevel((p) => (Math.abs(p - v) > 0.004 ? v : p)),
       onNotice: (msg) => { setNotice(msg); toast.warning(msg); },
       onEngine: setEngine,
+      onMic: setMicLost,
+      onSilence: () => {
+        const t = turn.current;
+        if (t?.awaitSilence && !t.done) return endTurn("match");
+        if (t && !t.done && t.words.length && alignPos(t.words, tb.current.turnWords()) / t.words.length >= 0.5) listener.current?.flush();
+      },
     });
     try {
       listener.current = l;
-      await l.open(hintsFrom(idxRef.current));
+      await l.open(hintsFrom(idxRef.current), contextFrom(idxRef.current));
     } catch {
       l.close();
       listener.current = null;
@@ -359,6 +394,7 @@ export default function Rehearsal() {
   };
 
   const begin = async () => {
+    unlockAudio();
     await openMic();
     prefetch(idxRef.current);
     runFrom(idxRef.current);
@@ -479,7 +515,7 @@ export default function Rehearsal() {
 
   return (
     <div className="max-w-7xl mx-auto px-6 md:px-10 pt-8 pb-36 grid lg:grid-cols-[1.25fr_1fr] gap-10">
-      <section className="flex flex-col items-center gap-8 lg:min-h-[calc(100vh-8rem)]" data-testid="rehearsal-stage">
+      <section className="flex flex-col items-center gap-4" data-testid="rehearsal-stage">
         <div className="w-full flex items-center justify-between">
           <div>
             <p className="font-mono text-[11px] tracking-[0.3em] text-amber-500">SALA DE ENSAIO</p>
@@ -494,9 +530,17 @@ export default function Rehearsal() {
             <Flag className="w-4 h-4 mr-2" /> Terminar
           </Button>
         </div>
+        {micLost && (
+          <div data-testid="mic-lost-warning" className="w-full flex items-center justify-between gap-3 text-sm text-rose-200 border border-rose-500/40 bg-rose-500/10 rounded-lg px-4 py-2">
+            <span>Microfone desligado: {micLost}</span>
+            <Button data-testid="mic-reactivate-btn" size="sm" className="rounded-full" onClick={async () => {
+              try { await listener.current?.openMic(); toast.success("Microfone reactivado"); } catch { toast.error("Sem acesso ao microfone."); }
+            }}>Reactivar microfone</Button>
+          </div>
+        )}
         {notice && <p data-testid="stt-engine-notice" className="w-full text-xs text-amber-300/90 border border-amber-500/20 rounded-lg px-3 py-2">{notice}</p>}
 
-        <div className="w-full flex-1 flex flex-col items-center justify-center gap-6 py-2">
+        <div className="w-full flex-1 flex flex-col items-center justify-center gap-4 py-1">
           {cur && (
             <div className="w-full text-center" data-testid="current-line">
               <div className="flex items-center justify-center gap-3">
@@ -507,11 +551,10 @@ export default function Rehearsal() {
                   <Pencil className="w-4 h-4" />
                 </button>
               </div>
-              <ClipWindow testid="current-line-window" progress={progress}>
-                <div data-testid="current-line-text" data-block-size={curBlock.length} className={`font-serif text-2xl md:text-3xl leading-snug mt-4 text-stone-100 space-y-3 ${showText ? "transition-[filter] duration-300" : "blur-md select-none"}`}>
-                  {curBlock.map((k) => <p key={k} data-testid={`current-block-line-${k}`}>{lineText(lines[k])}</p>)}
-                </div>
-              </ClipWindow>
+              <div data-testid="current-line-text" data-block-size={curBlock.length} data-block-idxs={isMine ? curBlock.join(",") : ""}>
+                <Teleprompter testid="current-line-window" texts={curBlock.map((k) => lineText(lines[k]))} progress={progress}
+                  className={`font-serif text-2xl md:text-3xl leading-snug mt-3 text-stone-100 ${showText ? "transition-[filter] duration-300" : "blur-md select-none"}`} />
+              </div>
               {cur.edited_text && <p className="mt-2 text-[11px] font-mono tracking-widest text-emerald-400" data-testid="current-line-edited">ALTERAÇÃO ACORDADA</p>}
             </div>
           )}
@@ -523,7 +566,9 @@ export default function Rehearsal() {
           )}
           {hint && phase === "listening" && <HintBox text={hint} />}
           {phase === "listening" && live && (
-            <p data-testid="live-transcript" className="text-sm italic text-stone-400 max-w-xl text-center">"{live}"</p>
+            <p data-testid="live-transcript" className="text-sm italic text-stone-400 max-w-xl text-center line-clamp-2">
+              "{live.split(" ").length > 22 ? `… ${live.split(" ").slice(-22).join(" ")}` : live}"
+            </p>
           )}
           {feedback && <FeedbackBox turn={feedback} said={lastSaid} />}
           {(phase === "interrupted" || (phase === "speaking" && feedback?.kind === "line")) && (
@@ -558,7 +603,7 @@ export default function Rehearsal() {
         </div>
       </section>
 
-      <aside className="hidden lg:block rounded-2xl border border-white/[0.07] bg-[#141210]/70 backdrop-blur-xl p-4 h-[calc(100vh-14rem)] overflow-y-auto script-scroll sticky top-24" data-testid="rehearsal-script-panel">
+      <aside className="hidden lg:block rounded-2xl border border-white/[0.07] bg-[#141210]/70 backdrop-blur-xl p-4 h-[calc(100vh-20rem)] overflow-y-auto script-scroll sticky top-24" data-testid="rehearsal-script-panel">
         <p className="text-[10px] font-mono tracking-widest text-stone-600 px-2 pb-2">CLICA NUMA FALA PARA SALTAR PARA AQUI OU EDITAR</p>
         <ScriptView lines={plan ? lines.filter((l) => plan.includes(l.idx)) : lines} myCharacter={mine} currentIdx={idx} hideMine={hideText} revealIdx={reveal ? idx : -1}
           hideForeign onJump={jumpTo} onEdit={openEdit} />
@@ -570,6 +615,23 @@ export default function Rehearsal() {
 }
 
 const lineText = (l) => l.edited_text || l.text;
+
+// said + the words the recogniser delivered after the block closed (found after said's last two words).
+const extendSaid = (said, txt, hasLast) => {
+  const s = said.split(" ").filter(Boolean);
+  const w = (txt || "").split(/\s+/).filter(Boolean);
+  if (!hasLast(txt || "")) return said;
+  const key = s.slice(-2).map(wordNorm).join(" ");
+  for (let k = w.length - 2; k >= 0; k--) {
+    if (w.slice(k, k + 2).map(wordNorm).join(" ") === key) {
+      const extra = w.slice(k + 2);
+      return extra.length && extra.length <= 4 ? `${said} ${extra.join(" ")}` : said;
+    }
+  }
+  // recogniser revised the end ("Dez mil" → "Dez minutos"): take the revised tail for the last words
+  const k = Math.max(0, s.length - 3);
+  return [...s.slice(0, k), ...w.slice(Math.max(0, w.length - (s.length - k) - 1))].join(" ");
+};
 
 const blockHints = (text) => {
   const clean = cleanForTts(text);

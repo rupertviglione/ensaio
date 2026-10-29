@@ -9,18 +9,19 @@ import { api, errMsg, VOICES, voiceBody } from "@/lib/api";
 import { playUrl } from "@/lib/audio";
 
 const ENGINES = [
+  { id: "auto", label: "Automático (principal da app)" },
   { id: "edge", label: "Edge pt-PT (grátis)" },
   { id: "openai", label: "OpenAI (reserva)" },
   { id: "elevenlabs", label: "ElevenLabs (opcional, gasta créditos)" },
 ];
 const comboKey = (c) => `${c.edge_voice}|${c.edge_pitch}|${c.edge_rate}`;
 
-const PreviewBtn = ({ c, sample }) => {
+const PreviewBtn = ({ c, sample, scriptId }) => {
   const [busy, setBusy] = useState(false);
   const preview = async () => {
     setBusy(true);
     try {
-      const url = await api.tts({ text: sample, ...voiceBody(c) });
+      const url = await api.tts({ text: sample, ...voiceBody(c, scriptId) });
       setBusy(false);
       await playUrl(url);
     } catch (e) {
@@ -74,11 +75,14 @@ const ElevenSelect = ({ c, voices, onPick }) => {
 
 const VoiceControls = ({ c, info, onChange, onEleven }) => (
   <div className="space-y-3">
-    <Select value={c.tts || "edge"} onValueChange={(v) => (v === "elevenlabs" && !c.el_voice_id ? onChange({ ...c, tts: v }, true) : onChange({ ...c, tts: v }))}>
+    <Select value={c.tts || "auto"} onValueChange={(v) => (v === "elevenlabs" && !c.el_voice_id ? onChange({ ...c, tts: v }, true) : onChange({ ...c, tts: v }))}>
       <SelectTrigger data-testid={`character-engine-select-${c.name}`} className="bg-[#0A0908] h-9 text-xs"><SelectValue /></SelectTrigger>
       <SelectContent>{ENGINES.filter((e) => e.id !== "elevenlabs" || info.eleven_configured).map((e) => <SelectItem key={e.id} value={e.id}>{e.label}</SelectItem>)}</SelectContent>
     </Select>
-    {(c.tts || "edge") === "edge" && (
+    {(c.tts || "auto") === "auto" && info.provider === "elevenlabs" && c.el_voice_id && (
+      <p className="text-xs text-emerald-300" data-testid={`character-auto-eleven-${c.name}`}>ElevenLabs: {c.el_voice_name || c.el_voice_id} (Edge como reserva)</p>
+    )}
+    {["edge", "auto"].includes(c.tts || "auto") && (
       <>
         <Select value={c.edge_voice} onValueChange={(v) => onChange({ ...c, edge_voice: v })}>
           <SelectTrigger data-testid={`character-voice-select-${c.name}`} className="bg-[#0A0908]"><SelectValue placeholder="Voz pt-PT" /></SelectTrigger>
@@ -98,7 +102,7 @@ const VoiceControls = ({ c, info, onChange, onEleven }) => (
   </div>
 );
 
-const CharacterRow = ({ c, sample, info, dup, onChange, onEleven, onRename }) => (
+const CharacterRow = ({ c, sample, info, dup, onChange, onEleven, onRename, scriptId }) => (
   <div className="rounded-xl border border-white/[0.07] bg-[#141210] p-5 grid md:grid-cols-[1fr_280px_auto] gap-4 items-start" data-testid={`character-row-${c.name}`}>
     <div>
       <div className="flex items-center gap-2">
@@ -113,7 +117,7 @@ const CharacterRow = ({ c, sample, info, dup, onChange, onEleven, onRename }) =>
       {dup && <p data-testid={`character-dup-warning-${c.name}`} className="mt-2 text-xs text-amber-300 flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" /> Mesma voz, tom e ritmo que {dup}.</p>}
     </div>
     <VoiceControls c={c} info={info} onChange={onChange} onEleven={onEleven} />
-    <PreviewBtn c={c} sample={sample} />
+    <PreviewBtn c={c} sample={sample} scriptId={scriptId} />
   </div>
 );
 
@@ -146,7 +150,8 @@ export const CharactersPanel = ({ script, onSaved }) => {
   };
   if (!info) return <div className="flex justify-center py-12" data-testid="voices-loading"><Loader2 className="w-6 h-6 animate-spin text-amber-500" /></div>;
   const sampleFor = (name) => script.lines.find((l) => l.character === name)?.text || `Olá, eu sou ${name}.`;
-  const dupOf = (c) => (c.tts || "edge") === "edge" && script.characters.find((x) => x.name !== c.name && (x.tts || "edge") === "edge" && comboKey(x) === comboKey(c))?.name;
+  const edgeLike = (x) => ["edge", "auto"].includes(x.tts || "auto");
+  const dupOf = (c) => edgeLike(c) && script.characters.find((x) => x.name !== c.name && edgeLike(x) && comboKey(x) === comboKey(c))?.name;
 
   return (
     <div className="space-y-4">
@@ -162,7 +167,7 @@ export const CharactersPanel = ({ script, onSaved }) => {
         </Button>
       </div>
       {script.characters.map((c) => (
-        <CharacterRow key={c.name} c={c} sample={sampleFor(c.name)} info={info} dup={dupOf(c)} onChange={update} onEleven={setEleven}
+        <CharacterRow key={c.name} scriptId={script.id} c={c} sample={sampleFor(c.name)} info={info} dup={dupOf(c)} onChange={update} onEleven={setEleven}
           onRename={async (old, n) => { try { onSaved(await api.renameCharacter(script.id, old, n)); toast.success("Personagem actualizada"); } catch (e) { toast.error(errMsg(e)); } }} />
       ))}
     </div>

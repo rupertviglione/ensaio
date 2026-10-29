@@ -18,7 +18,7 @@ const LineActions = ({ l, onJump, onEdit }) => (
 
 const spoken = (l) => l && (l.kind === "dialogue" || l.kind === "cut");
 
-export const ScriptView = ({ lines, myCharacter, startIdx, onStartHere, currentIdx, hideMine = false, revealIdx, hideForeign = false, onJump, onEdit }) => {
+export const ScriptView = ({ lines, myCharacter, startIdx, onStartHere, currentIdx, hideMine = false, revealIdx, hideForeign = false, onJump, onEdit, autoMarked = [], onRevert }) => {
   const curRef = useRef();
   const [sel, setSel] = useState(null);
   useEffect(() => {
@@ -40,11 +40,15 @@ export const ScriptView = ({ lines, myCharacter, startIdx, onStartHere, currentI
         const actions = pick && sel === l.idx && <LineActions l={l} onJump={(i) => { setSel(null); onJump(i); }} onEdit={(x) => { setSel(null); onEdit(x); }} />;
         if (l.kind === "direction" || l.kind === "foreign") {
           return (
-            <div key={l.idx} ref={isCur ? curRef : null} data-testid={`script-line-${l.idx}`} data-kind={l.kind} onClick={() => pick?.(l)}
+            <div key={l.idx} ref={isCur ? curRef : null} data-testid={`script-line-${l.idx}`} data-kind={l.kind} data-current={isCur ? "true" : "false"} onClick={() => pick?.(l)}
               className={`px-5 py-2 ${pick ? "cursor-pointer hover:bg-white/[0.03] rounded-xl" : ""}`}>
               <p className={`font-serif italic text-base ${l.kind === "foreign" ? "text-stone-500 text-sm" : "text-stone-500"}`}>
                 {l.kind === "foreign" && <span className="not-italic font-mono text-[10px] tracking-widest text-stone-400 mr-2">NÃO PERTENCE</span>}
                 {l.text}
+                {onRevert && l.kind === "foreign" && autoMarked.includes(l.uid) && (
+                  <button data-testid={`revert-foreign-btn-${l.idx}`} onClick={(e) => { e.stopPropagation(); onRevert(l); }}
+                    className="not-italic ml-3 text-[10px] font-mono tracking-widest text-amber-400 hover:text-amber-300">REPOR</button>
+                )}
               </p>
               {actions}
             </div>
@@ -60,6 +64,7 @@ export const ScriptView = ({ lines, myCharacter, startIdx, onStartHere, currentI
             ref={isCur ? curRef : null}
             data-testid={`script-line-${l.idx}`}
             data-kind={l.kind}
+            data-current={isCur ? "true" : "false"}
             data-grouped={grouped ? "true" : "false"}
             onClick={() => pick?.(l)}
             className={`group relative rounded-xl px-5 border-l-2 transition-colors duration-300 ${grouped ? "pt-1 pb-3 -mt-1" : "py-3"} ${pick ? "cursor-pointer" : ""} ${

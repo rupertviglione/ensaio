@@ -27,7 +27,7 @@ export const MicButton = ({ phase, level, onClick }) => {
   const scale = listening ? 1 + Math.min(level * 8, 0.35) : 1;
   return (
     <div className="flex flex-col items-center gap-5">
-      <div className="relative w-36 h-36 flex items-center justify-center">
+      <div className="relative w-28 h-28 flex items-center justify-center">
         {listening && <span className="mic-ring absolute inset-0 rounded-full border-2 border-amber-400" />}
         {listening && <span className="mic-ring absolute inset-0 rounded-full border-2 border-amber-400" style={{ animationDelay: "0.8s" }} />}
         <button
@@ -35,7 +35,7 @@ export const MicButton = ({ phase, level, onClick }) => {
           onClick={onClick}
           disabled={busy || phase === "ai" || phase === "speaking"}
           style={{ transform: `scale(${scale})` }}
-          className={`relative w-32 h-32 rounded-full flex items-center justify-center transition-[transform,background-color,box-shadow] duration-150 disabled:cursor-default ${
+          className={`relative w-24 h-24 rounded-full flex items-center justify-center transition-[transform,background-color,box-shadow] duration-150 disabled:cursor-default ${
             listening ? "bg-amber-500 text-[#0A0908] shadow-[0_0_60px_rgba(245,158,11,0.45)]"
               : phase === "ai" || phase === "speaking" ? "bg-sky-500/10 border border-sky-400/40"
               : "bg-[#1C1917] border border-amber-500/40 text-amber-400 hover:bg-amber-500/10"

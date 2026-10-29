@@ -1,0 +1,182 @@
+{
+ "iteration": 3,
+ "mode": "retest",
+ "passed": 19,
+ "failed": 1,
+ "retest_needed": true,
+ "bugs": [
+  {
+   "severity": "medium",
+   "title": "Running-header heuristic wipes real dialogue: any character whose lines differ only by digits, or who says the same short line 3+ times (e.g. PEDRO: 'Sim.' x3), gets every line auto-marked 'Texto não pertencente' and loses its speaker",
+   "criterion": "Non-belonging auto-mark",
+   "evidence": "POST /api/scripts with 'PEDRO: Sim.' x3 + 'RUI: Fala do Rui numero 0..3' -> 200, lines kind=foreign: [(0,'RUI — Fala do Rui numero 0.'),...,(8,'PEDRO — Sim.'),(10,'PEDRO — Sim.'),(12,'PEDRO — Sim.')]. Cause: server.py mark_non_script 'headers' rule (key() replaces digits with #; len(set(ts))==1 && len>=3). Fix idea: require the line to look like a header (e.g. uppercase/contains '—'/'Acto'), not merely repeated, and never digit-fold dialogue. Test: e1_tests/test_tscheck_settings_nonbelong.py::test_similar_dialogue_not_marked_header"
+  }
+ ],
+ "action_items": [
+  {
+   "type": "note",
+   "detail": "Settings 'invalid key shows invalid status' NOT exercised: saving an invalid key would overwrite the user's live keys (all now source=app). Verify manually or expose a dry-run validate endpoint."
+  },
+  {
+   "type": "note",
+   "detail": "Seed fact stale: ElevenLabs key is now VALID (tts_primary=elevenlabs), so voices-tab-edge (expects edge) fails by design of the old check; not an app bug. Deepgram/Gemini keys also changed (last4 ff29/dUOA, source=app)."
+  },
+  {
+   "type": "note",
+   "detail": "Selector drift: testid current-block-line-N was removed with the Teleprompter rewrite; checks updated to use the script panel's active line class. Consider adding data-current='true' on the active script-line for stable testing."
+  },
+  {
+   "type": "note",
+   "detail": "Live transcript 2-line clamp verified only statically (line-clamp-2 class); real-mic accuracy needs human testing."
+  }
+ ],
+ "checks": [
+  {
+   "criterion": "Deepgram via backend proxy",
+   "name": "test_tscheck_settings_nonbelong.py::test_deepgram_ws_ingress",
+   "lane": "backend",
+   "status": "passed",
+   "evidence": "wss://<preview>/api/stt/deepgram through ingress -> first message {type:'Ready'}"
+  },
+  {
+   "criterion": "Deepgram via backend proxy",
+   "name": "rehearsal-deepgram-badge",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "Run on preview ingress URL, mic granted; badge data-engine=deepgram, text 'Escuta: Deepgram'"
+  },
+  {
+   "criterion": "Expected-text reasoning matching",
+   "name": "test_tscheck_matching.py",
+   "lane": "backend",
+   "status": "passed",
+   "evidence": "POST /sessions/{id}/turn: 'A RTP'->no 'arrota' diff; 'malandra'->no 'malandreco' diff; 'rua' flags 'casa'; long missing passage accuracy<70 with diffs"
+  },
+  {
+   "criterion": "Settings page",
+   "name": "test_tscheck_settings_nonbelong.py::test_keys_masked+unknown_provider",
+   "lane": "backend",
+   "status": "passed",
+   "evidence": "GET /settings/keys 200: 3 providers, no 'key' field, last4 only; PUT /settings/keys/nope 404"
+  },
+  {
+   "criterion": "Settings page",
+   "name": "settings-keys-masked",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "/definicoes shows key cards+inputs for elevenlabs/deepgram/gemini; last4 'ff29'; no key-like string in API. Invalid-key status not exercised (see action_items)"
+  },
+  {
+   "criterion": "Pronúncia tab",
+   "name": "test_tscheck_settings_nonbelong.py::test_pronunciation_persist",
+   "lane": "backend",
+   "status": "passed",
+   "evidence": "PUT then GET /scripts/{id}/pronunciation keeps croissant item"
+  },
+  {
+   "criterion": "Pronúncia tab",
+   "name": "pronunciation-tab-detect-edit",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "Detected croissant|fr|crua-çã, vernissage, déjà vu, c'est la vie; edit 'say' saved and persists after reload"
+  },
+  {
+   "criterion": "Non-belonging auto-mark",
+   "name": "test_tscheck_settings_nonbelong.py::test_page_numbers_auto_marked",
+   "lane": "backend",
+   "status": "passed",
+   "evidence": "'12','13' kind=foreign, dialogue untouched, auto_marked non-empty"
+  },
+  {
+   "criterion": "Non-belonging auto-mark",
+   "name": "test_tscheck_settings_nonbelong.py::test_similar_dialogue_not_marked_header",
+   "lane": "backend",
+   "status": "failed",
+   "evidence": "Real dialogue (PEDRO 'Sim.' x3, RUI 'Fala ... numero N') marked foreign — see bugs[0]"
+  },
+  {
+   "criterion": "Non-belonging auto-mark",
+   "name": "non-belonging-auto-mark-revert",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "Headers+page numbers marked NÃO PERTENCE, 4 dialogue lines intact, auto-marked-note shown, REPOR restores kind"
+  },
+  {
+   "criterion": "Long-line teleprompter + layout",
+   "name": "rehearsal-layout-group-longline",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "1440x800: >240-char line data-mode=teleprompter, window height 168px; mic, controls, text input inside viewport; scrollHeight 800; grouping intact"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "rehearsal-inline-edit-persists",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "edit persisted after reload"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "rehearsal-jump-here",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "Saltar para aqui in 74ms (fixture changed to word numbers to avoid header bug)"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "rehearsal-skip-mode",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "SEEN [0,2,3,4,5,6,8,9]"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "rehearsal-keyboard-shortcuts",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "arrows, S, T, ?, E, space, typing isolation OK"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "editor-line-kinds-bulk",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "kinds saved incl. foreign/cut"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "rehearsal-failed-save-keeps-line",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "500 toast, line kept"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "rehearsal-text-fallback-summary",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "text turn -> summary"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "new-script-paste-detects-characters",
+   "lane": "browser",
+   "status": "passed",
+   "evidence": "characters detected"
+  },
+  {
+   "criterion": "Regression phase 3",
+   "name": "backend regression suite (11 prior tests)",
+   "lane": "backend",
+   "status": "passed",
+   "evidence": "11 passed"
+  },
+  {
+   "criterion": "Regression (voices, stale seed)",
+   "name": "voices-tab-edge",
+   "lane": "browser",
+   "status": "blocked",
+   "evidence": "Expected engine 'edge', got 'elevenlabs': ElevenLabs key is now valid, so the stale seed premise no longer holds. Not an app bug."
+  }
+ ]
+}

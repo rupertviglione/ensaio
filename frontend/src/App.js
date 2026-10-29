@@ -7,6 +7,7 @@ import NewScript from "@/pages/NewScript";
 import ScriptPage from "@/pages/ScriptPage";
 import Rehearsal from "@/pages/Rehearsal";
 import Summary from "@/pages/Summary";
+import Settings from "@/pages/Settings";
 
 function App() {
   return (
@@ -18,6 +19,7 @@ function App() {
             <Route path="/" element={<Library />} />
             <Route path="/novo" element={<NewScript />} />
             <Route path="/texto/:id" element={<ScriptPage />} />
+            <Route path="/definicoes" element={<Settings />} />
             <Route path="/ensaio/:sessionId" element={<Rehearsal />} />
             <Route path="/resumo/:sessionId" element={<Summary />} />
           </Routes>

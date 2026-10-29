@@ -1,0 +1,37 @@
+{
+  "summary": "Round 7 tested on backend and frontend. Backend: the new suite tests/test_ensaio_round7.py passes 17/17. It covers: settings keys masked, with no full key strings from .env in the body; invalid deepgram 'abc123' and elevenlabs 'sk_invalid' are rejected with attempt.valid=false, the old key is kept (d7ba/env) and tts_primary stays edge; check deepgram/gemini returns valid; unknown provider gives 404; the WS proxy works on localhost and on the public wss URL (Ready, then Results/Metadata after 2s of silence + CloseStream); paged script: the 7 auto-marked lines are foreign (3 headers, '- 1 -', 'Pág. 2', '3', '* * *'), only ANA/RUI, no dialogue marked, dismiss persists; pronunciation: GET has Jean Genet fr with a 'say' respelling, PUT round-trips, line 0 keyterms include Jean Genet, and detect on a 'Nova Iorque'/'New York' script returns only New York; local_match: arrota/'A RTP' and malandreco/malandra give 0 differences, casa→rua gives 1 'troca', and a long omission gives a 'salto'; TTS with the foreign word returns audio/mpeg with X-TTS-Provider edge. Frontend (local Playwright with /root/bin/chromium and fake mic, scripts in /app/tests/e2e/ui_round7.py and ui_round7_rehearsal.py): ui_round7.py 20/22, ui_round7_rehearsal.py 12/12. Checked: Settings nav, the 3 cards with last4, Verificar valid for deepgram and gemini, invalid save shows the 'Chave Deepgram inválida.' toast and keeps the old key; Pronúncia tab with 10 rows, add + save persists after reload, Detectar de novo works (toast); Vozes engine select defaults to 'Automático (principal da app)'; Guião auto-marked note count 7, rever, REPOR turns '- 1 -' into a direction (count goes to 6), dismiss stays hidden after reload; rehearsal badge shows Escuta: Deepgram; a 528-char line gets data-mode=teleprompter, 5 sentences, height exactly 168px; at 1920x800 rehearsal-status and controls are in view with no page scroll; regressions ? overlay, skip toggle, line editor and jump-here all pass. Two failures: (1) a real bug, covered in backend_issues.minor[0]; (2) no deepgram balance, because the .env key lacks billing:read (403). Not covered: the live-transcript 2-line clamp at runtime (the fake-mic beep gave no words; the code uses line-clamp-2), and the mic-lost/revive flow.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PUT /api/settings/keys/{provider} (keys.save)", "issue": "On an invalid attempt, STATUS[p] is set to the attempt result even though the key is not replaced. GET /settings/keys and the Definições card then show the WORKING key …d7ba as 'Chave Deepgram inválida.' (red) until the user clicks Verificar. Fix: only set STATUS[p] = st when st['valid'], and return the failed result only under 'attempt'."},
+      {"endpoint": "keys.validate (elevenlabs)", "issue": "Validation calls eleven.set_key(candidate) on the global key and overwrites eleven.STATUS. Concurrent /api/tts calls made during validation use the candidate key. eleven_ready() restores the status afterwards, but there is a race window. Validate with a local client/key instead of mutating globals."},
+      {"endpoint": "POST /api/settings/keys/deepgram/check", "issue": "No balance is shown because the .env key lacks the billing:read scope (balances returns 403). The error is silent; consider returning 'sem permissão para ler o saldo' like ElevenLabs does with credits_error."},
+      {"endpoint": "PUT /api/scripts/{id}/pronunciation", "issue": "It accepts items whose text is not in the script (e.g. 'Pas de deux'). These are silently dropped on the next detect (the keep filter). Acceptable, but the user is not told."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Rehearsal at 1920x800 (long-line teleprompter)", "issues": ["The 'Terminei' button (done-speaking-btn) bottom is at 659.5px while the fixed rehearsal-controls bar starts at 647px, so about 12px is hidden under the bar.", "The rehearsal-script-panel aside (h calc(100vh-14rem), sticky top-24) ends at 673px, about 26px under the fixed controls bar. Lower lines and their SALTAR PARA AQUI buttons can sit under the bar: a force-click hit the bar instead of the button. Use h-[calc(100vh-20rem)] or add bottom padding equal to the controls height."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_round7.py", "/app/tests/e2e/ui_round7.py", "/app/tests/e2e/ui_round7_rehearsal.py", "/app/test_reports/pytest/pytest_round7.xml"],
+  "action_items": [
+    "keys.save: do not overwrite STATUS[provider] with a failed attempt (the working key currently shows as invalid after a bad paste)",
+    "keys.validate(elevenlabs): avoid mutating the global eleven key/status during validation",
+    "Rehearsal layout at short viewports: keep done-speaking-btn and the bottom of the aside panel above the fixed controls bar",
+    "Optional: show a 'no billing:read permission' note for the Deepgram balance"
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1513 lines; consider splitting settings/pronunciation/proxy into routers",
+    "The WS proxy has no auth or rate limit: anyone who can reach /api/stt/deepgram uses your Deepgram credits (no-auth app, but worth noting)",
+    "keys.save with an empty key silently unsets the app key; fine, but the UI only offers this through key-remove-btn when source=app"
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_round7.py", "/app/tests/e2e/ui_round7.py", "/app/tests/e2e/ui_round7_rehearsal.py"],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "94% (32/34; 1 real bug, 1 expected missing balance)"},
+  "seed_data_creation": "None kept. TEST_Paginado_r7, TEST_NovaIorque, TEST_Paginado_ui7 and TEST_Teleprompter_r7 were created and deleted. TEST_Estrangeiros pronunciation items were restored to their original values after the UI add/detect test. No valid keys were saved; key statuses were re-checked at the end (deepgram/gemini valid, elevenlabs invalid, tts_primary edge).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run the backend suite with: cd /app/backend && python -m pytest tests/test_ensaio_round7.py (pytest.ini uses xdist; use -n 0 to see prints). Run the UI checks with: python tests/e2e/ui_round7.py and ui_round7_rehearsal.py. They use local Playwright with /root/bin/chromium and fake media flags, and the browser_automation tool is not needed. stt-engine-name is uppercase via CSS, so compare case-insensitively. In the rehearsal aside, jump-here buttons only appear after clicking a script-line."
+}

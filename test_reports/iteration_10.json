@@ -1,0 +1,26 @@
+{
+  "summary": "Backend-only retest of the mark_non_script fix. Both iteration_9 issues are now FIXED. Fixed: regularly spaced PEDRO 'Sim.' x3 and MARIA 'Não.' x4 keep their speakers and are not marked foreign. The 'Texto de João Silva' footer next to page numbers is marked. Regressions pass: round9 (all), e1_tests/test_tscheck_settings_nonbelong.py (all), round7 TestPaged and TestSettings, 23/23 in total. New adversarial file tests/test_ensaio_round10.py has 6 of 7 passing. These are not marked: shouted 'ANA: NÃO!' x3 regularly spaced, 'RUI: Só no Acto dois.' x3, title plus em dash inside dialogue x3, ACTO-with-digit variants, and a regularly spaced 'PAUSA.' direction. The real 'O JARDIM — Acto I' header plus page numbers is still marked. One minor edge-case false positive remains, described below.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/scripts (mark_non_script near_break, server.py L320)", "issue": "near_break treats i<=1 and i>=len-2 (the edges of the document) as page-break evidence even when there are NO page numbers. Short ALL-CAPS dialogue repeated 3 times, with 2 of the 3 at the first and last line (e.g. 'ANA: NÃO!' at index 0, 4 and 8 of a 9-line script), meets 2/3 >= half. All 3 lines become foreign 'ANA — NÃO!' and lose the speaker. Repro: tests/test_ensaio_round10.py::test_caps_dialogue_at_edges. Suggested fix: for dialogue groups, count only page_at proximity, not document edges. Or require at least one page marker in the document before dialogue can be marked."},
+      {"endpoint": "POST /api/scripts (heuristic limitation)", "issue": "ALL-CAPS dialogue that repeats right before a page number 3 times (e.g. 'ANA: NÃO!' then a blank line, then '1') is marked foreign. Header-like text plus page-break proximity fits the spec, so this is accepted behaviour. It could be tightened by requiring header-like dialogue to be the SAME distance from the page number on every page and on the opposite side from the speech. Low priority."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_ensaio_round10.py", "/app/backend/tests/test_ensaio_round9.py", "/app/backend/e1_tests/test_tscheck_settings_nonbelong.py", "/app/backend/tests/test_ensaio_round7.py", "/app/test_reports/pytest/round10.xml", "/app/test_reports/pytest/round10_adv.xml"],
+  "action_items": [
+    "Optional/minor: in mark_non_script, stop counting document edges (i<=1 / i>=len-2) as near_break evidence for dialogue groups (k[0]=='d'). Use only proximity to page_at. Re-run tests/test_ensaio_round10.py::test_caps_dialogue_at_edges."
+  ],
+  "critical_code_review_comments": [
+    "Fix is correct: _header_like now gets the raw line text (occ[0][1]) instead of 'NAME — text', and for dialogue it requires near_break; _regular only applies to direction lines.",
+    "The edge-of-document clause in near_break is reasonable for directions (a title/header on line 0). For dialogue it is weak evidence.",
+    "server.py is still >1500 lines and should be split into modules (parser, tts, settings)."
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_round10.py"],
+  "success_rate": {"backend": "97% (29/30: 23/23 regression/retest + 6/7 adversarial)", "frontend": "not tested (backend only)"},
+  "seed_data_creation": "TEST_r10-* and TEST_r10p-* scripts were created and all deleted. No keys were modified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "backend/pytest.ini adds '-n --dist loadscope' (xdist), so do not pass -p no:xdist. Export REACT_APP_BACKEND_URL from frontend/.env before running. round10 test_caps_dialogue_at_edges is the only failing probe."
+}

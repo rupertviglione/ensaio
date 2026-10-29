@@ -1,0 +1,35 @@
+{
+  "summary": "Phase 3 (F-17..F-23) tested on backend and frontend; Phase 2 regression also checked. Backend: the new suite tests/test_ensaio_phase3.py passes 13/13 and Phase 2 still passes 18/18 (31/31 total). The phase 3 tests cover PATCH text (trimmed, persisted, memory link cleared), character reassign, a direction with a character becoming dialogue, cut keeping the character plus restore, characters that only have cut lines staying in the list, foreign clearing the character, empty text 400, unknown uid 404, invalid kind 422, PUT accepting foreign/cut with uids kept, and PUT with no dialogue 400. Frontend: all UI tests ran on TEST_ clones of 'A Espera' in text mode. JRN-32: with PATCH forced to 500, the toast 'Não foi possível guardar a alteração' appears, the dialog stays open and the line stays JOÃO. JRN-30: one click on line-editor-character-MARTA saves and closes the dialog; lines 4 and 5 become grouped and the block at 3 has data-block-size=3; restoring works. JRN-31: a cut line is struck through with data-kind=cut, and it is skipped (cutting 6 merges 5 and 7 into a block); 'Repor fala' restores it. JRN-33: the jump via jump-here-btn shows within 132ms, a latency entry of type jump is logged, and the run continues from there. Q-36: 5 text edits, 5 character changes and 5 cuts made in rehearsal are all correct after reload in the rehearsal panel and in the Guião editor. JRN-34/35: with skip-mode-switch on, the badge shows and the non-cue AI lines (11, 16) are never requested from /api/tts; the S key turns it off, line 16 is then requested and the run reaches the summary. JRN-36: only the first of 3 consecutive ANA lines shows the name, in both the Guião view and the panel. JRN-37: a 1167-char line sits in a 170px window (scrollHeight 880, overflow auto) and the next-line-btn bounding box is identical on short and long lines. JRN-38: →, ←, T, S, ?, Escape, H, E, Space and Enter all work (Enter with voice on and nothing said gives the toast 'Não ouvi nada'); typing in line-editor-text and text-entry-input triggers no shortcuts; there are 8 kbd hints. JRN-39: kind foreign/cut and bulk Rubrica on 3 lines persist; the foreign line is hidden in the panel and shows 'NÃO PERTENCE' in the Guião; the cut line is struck through. JRN-40: pasting a script detects RITA and TIAGO. JRN-41: an edited AI line gets TTS for the new text; E during listening pauses and the run resumes on the same line after saving; a full run in text mode gives 100% and 'Nenhuma diferença'; the badge shows 'Escuta: Deepgram' with voice on. All TEST_ scripts were deleted and the demo was never edited and is unchanged.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PATCH /api/scripts/{id}/lines/{uid}", "issue": "{kind:'cut'} on a direction line gives a line with kind 'cut' and character null, which is an odd state: ScriptView renders it as a spoken line with an empty name. Consider rejecting this or keeping it as a direction."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Guião view (ScriptView)", "issues": ["The 'NÃO PERTENCE' foreign line uses text-stone-600 on a near-black background. Contrast is very low and the line is hard to read."]},
+      {"screen": "Sala de ensaio", "issues": ["When the current line in the side panel scrolls into view (scrollIntoView on a long block), the whole window can scroll and the title/progress go under the sticky nav (seen when jumping to the long line). Consider scrolling only inside the aside container."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_ensaio_phase3.py", "/app/backend/tests/test_ensaio_phase2.py", "/app/backend/tests/clone_demo.py", "/app/backend/tests/make_group_long.py", "/app/test_reports/pytest/pytest_results_phase3.xml"],
+  "action_items": [
+    "Optional: raise the contrast of the foreign ('NÃO PERTENCE') line text in ScriptView",
+    "Optional: scroll the rehearsal panel's current line inside the aside only (e.g. compute scrollTop instead of scrollIntoView) so the page header doesn't move",
+    "Optional: block or normalise PATCH kind=cut on lines that have no character"
+  ],
+  "critical_code_review_comments": [
+    "Rehearsal.jsx keyRef: preventDefault is called for Enter/Space even when nothing happens (e.g. Enter when not listening), so a keyboard-focused button such as 'Terminar' cannot be activated with Enter/Space. Consider skipping the shortcut when e.target is a BUTTON.",
+    "ScriptView grouping treats a cut line as spoken, so a dialogue line right after a cut line of the same character has no name header. This is acceptable, but the header then appears only on the struck-through line.",
+    "The jump latency entry only measures the synchronous part of jumpTo (always ~0ms). It does not measure the time until the line is visible or the audio starts; I measured 132ms to visible."
+  ],
+  "updated_files": ["/app/backend/tests/test_ensaio_phase3.py", "/app/backend/tests/clone_demo.py", "/app/backend/tests/make_group_long.py"],
+  "success_rate": {"backend": "100% (31/31)", "frontend": "100% of the requested journeys (JRN-30..41, Q-36/37/38/40)"},
+  "seed_data_creation": "Temporary TEST_Espera_A/B/C, TEST_grupo_longo and TEST_paste_p3 were created and then deleted. The demo 'A Espera' was not modified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run pytest with -n 0: tests/test_ensaio_phase2.py and tests/test_ensaio_phase3.py. clone_demo.py <title> clones 'A Espera' and creates a MARTA session (prints ids), and make_group_long.py builds a grouping/long-line script. Use 'Só escrita' (voice-toggle-btn) and text-entry-input for deterministic UI flows, and delete TEST_ scripts afterwards. localStorage prefs are per browser context, so remembering prefs across browser runs cannot be verified with fresh contexts.",
+  "test_credentials": "No auth"
+}

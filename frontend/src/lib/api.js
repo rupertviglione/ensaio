@@ -21,6 +21,7 @@ export const api = {
     return http.post("/extract", fd).then((r) => r.data);
   },
   addMemory: (id, text, extra = {}) => http.post(`/scripts/${id}/memory`, { text, ...extra }).then((r) => r.data),
+  patchLine: (id, uid, patch) => http.patch(`/scripts/${id}/lines/${uid}`, patch).then((r) => r.data),
   updateLines: (id, lines) => http.put(`/scripts/${id}/lines`, { lines }).then((r) => r.data),
   renameCharacter: (id, old, name) => http.post(`/scripts/${id}/rename-character`, { old, new: name }).then((r) => r.data),
   deleteMemory: (id, noteId) => http.delete(`/scripts/${id}/memory/${noteId}`).then((r) => r.data),
@@ -44,11 +45,20 @@ export const api = {
   voices: () => http.get("/voices").then((r) => r.data),
   elevenStatus: () => http.get("/eleven/status").then((r) => r.data),
   sttToken: () => http.post("/stt/token").then((r) => r.data),
+  sttDeepgram: () => http.post("/stt/deepgram-token").then((r) => r.data),
+  sttGemini: () => http.post("/stt/gemini-token").then((r) => r.data),
+  sttEngines: () => http.get("/stt/engines").then((r) => r.data),
+  ttsStatus: () => http.get("/tts/status").then((r) => r.data),
   setElevenVoice: (id, character, voice) => http.post(`/scripts/${id}/eleven-voice`, { character, voice }).then((r) => r.data),
   autoVoices: (id) => http.post(`/scripts/${id}/auto-voices`).then((r) => r.data),
   tts: (body) =>
     http.post("/tts", body, { responseType: "blob" }).then((r) => URL.createObjectURL(r.data)),
 };
+
+export const voiceBody = (c) => ({
+  voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id,
+  tts: c.tts, edge_voice: c.edge_voice, edge_pitch: c.edge_pitch, edge_rate: c.edge_rate,
+});
 
 export const VOICES = [
   { id: "onyx", label: "Onyx — grave, masculina" },

@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Pause, Play, SkipBack, SkipForward, Lightbulb, Flag, Mic, MicOff, Volume2, VolumeX, Check } from "lucide-react";
+import { Pause, Play, SkipBack, SkipForward, Lightbulb, Flag, Mic, MicOff, Volume2, VolumeX, Check, Pencil, FastForward, Eye, EyeOff, Keyboard } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { api, errMsg } from "@/lib/api";
-import { playUrl, stopAudio } from "@/lib/audio";
+import { api, errMsg, voiceBody } from "@/lib/api";
+import { playUrl, stopAudio, audioProgress } from "@/lib/audio";
 import { isComplete, localVerdict, normTokens, HELP_RE, NOTE_RE } from "@/lib/match";
 import { TranscriptBuffer, alignPos, cleanForTts, splitWords } from "@/lib/transcript";
 import { Listener } from "@/lib/listener";
 import { ScriptView } from "@/components/script/ScriptView";
-import { loadPrefs } from "@/components/script/RehearsalSetup";
+import { loadPrefs, savePrefs } from "@/components/script/RehearsalSetup";
+import { LineEditor } from "@/components/rehearsal/LineEditor";
+import { ShortcutsOverlay, ClipWindow, Kbd } from "@/components/rehearsal/Shortcuts";
 import { MicButton } from "@/components/rehearsal/MicButton";
 import { TextEntry, FeedbackBox, HintBox, EngineBadge } from "@/components/rehearsal/Parts";
 
@@ -41,6 +43,13 @@ export default function Rehearsal() {
   const [engine, setEngine] = useState(null);
   const [notice, setNotice] = useState("");
   const [prompterVoice, setPrompterVoice] = useState(() => localStorage.getItem("ensaio-prompter-voice") !== "off");
+  const [skipMode, setSkipMode] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [showKeys, setShowKeys] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [resumeAt, setResumeAt] = useState(null);
+  const skipRef = useRef(false);
+  const keyRef = useRef(() => {});
   const run = useRef(0);
   const listener = useRef(null);
   const tb = useRef(new TranscriptBuffer());
@@ -56,6 +65,8 @@ export default function Rehearsal() {
       if (s.status === "finished") return nav(`/resumo/${sessionId}`, { replace: true });
       const sc = await api.getScript(s.script_id);
       setHideText(loadPrefs(sc.id).hideText ?? true);
+      setSkipMode(!!loadPrefs(sc.id).skipMode);
+      skipRef.current = !!loadPrefs(sc.id).skipMode;
       setSession(s);
       setScript(sc);
       const first = s.focus_idxs?.length ? buildPlan(sc.lines, s.focus_idxs, s.character)[0] : s.start_idx;
@@ -63,7 +74,7 @@ export default function Rehearsal() {
       setIdx(resume);
       idxRef.current = resume;
     }).catch(() => nav("/"));
-    api.elevenStatus().then((st) => st.messages?.length && setNotice(st.messages.join(" · "))).catch(() => {});
+    api.sttEngines().then((st) => st.messages?.length && setNotice(st.messages.join(" · "))).catch(() => {});
     return () => {
       run.current++;
       stopAudio();
@@ -72,19 +83,58 @@ export default function Rehearsal() {
     };
   }, [sessionId, nav]);
 
+  useEffect(() => {
+    const f = (e) => keyRef.current(e);
+    window.addEventListener("keydown", f);
+    return () => window.removeEventListener("keydown", f);
+  }, []);
+
+  useEffect(() => {
+    if (resumeAt == null) return;
+    const i = resumeAt;
+    setResumeAt(null);
+    listener.current?.setActive(true);
+    clearFor(i);
+    runFrom(i);
+  }, [resumeAt]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const lines = script?.lines || [];
   const mine = session?.character;
   const plan = session?.focus_idxs?.length ? buildPlan(lines, session.focus_idxs, mine) : null;
   const nextOf = (i) => (plan ? plan.find((p) => p > i) ?? lines.length : i + 1);
   const hintMs = (session?.hint_seconds || 5) * 1000;
-  const goIdx = (i) => { idxRef.current = i; setIdx(i); };
+  const goIdx = (i) => { idxRef.current = i; setIdx(i); setProgress(0); };
+  // Modo Saltar: an AI line is played only when it is the cue right before one of the actor's blocks.
+  const isCue = (i) => {
+    let j = nextOf(i);
+    while (j < lines.length && lines[j].kind !== "dialogue") j = nextOf(j);
+    return j < lines.length && lines[j].character === mine;
+  };
+  // Consecutive lines of the actor's character (stage directions in between allowed) form one block.
+  const blockOf = (i) => {
+    const out = [i];
+    for (let j = nextOf(i); j < lines.length; j = nextOf(j)) {
+      if (lines[j].kind !== "dialogue") continue;
+      if (lines[j].character !== mine) break;
+      out.push(j);
+    }
+    return out;
+  };
+  const blockText = (b) => b.map((k) => lineText(lines[k])).join(" ");
+  const hintsFrom = (from) => {
+    let i = from;
+    while (i < lines.length && !(lines[i].kind === "dialogue" && lines[i].character === mine)) i = nextOf(i);
+    return i < lines.length ? blockHints(blockText(blockOf(i))) : [];
+  };
+  const clearFor = (from) => { tb.current.clear(); listener.current?.clear(hintsFrom(from)); };
 
   const getAudio = (l) => {
-    if (!cache.current.has(l.idx)) {
+    const k = `${l.uid}|${l.character}|${lineText(l)}`;
+    if (!cache.current.has(k)) {
       const c = script.characters.find((x) => x.name === l.character);
-      cache.current.set(l.idx, api.tts({ text: lineText(l), voice: c.voice, character: c.name, style: c.style, el_voice_id: c.el_voice_id }).catch(() => null));
+      cache.current.set(k, c ? api.tts({ text: lineText(l), ...voiceBody(c) }).catch(() => null) : Promise.resolve(null));
     }
-    return cache.current.get(l.idx);
+    return cache.current.get(k);
   };
   const getPrompter = (text) => {
     const k = `p:${text}`;
@@ -97,7 +147,7 @@ export default function Rehearsal() {
     for (let i = from; i < lines.length && n < 6; i = nextOf(i)) {
       const l = lines[i];
       if (l.kind !== "dialogue") continue;
-      if (l.character !== mine) getAudio(l);
+      if (l.character !== mine) { if (!skipRef.current || isCue(i)) getAudio(l); }
       else if (prompterVoice) getPrompter(splitWords(cleanForTts(lineText(l))).slice(0, 3).join(" "));
       n++;
     }
@@ -132,7 +182,8 @@ export default function Rehearsal() {
     if (r.memory_note) toast.success("Guardado na memória do texto", { description: r.memory_note.text });
     if (r.advance) {
       setFeedback(r.turn.severity === "major" ? r.turn : null);
-      return runFrom(nextOf(i), token);
+      const b = blockOf(i);
+      return runFrom(nextOf(b[b.length - 1]), token);
     }
     setFeedback(r.turn);
     if (r.turn.feedback && prompterVoice) await speak(r.turn.feedback, token);
@@ -145,7 +196,7 @@ export default function Rehearsal() {
     setPhase("processing");
     setLastSaid(said);
     try {
-      const r = await api.turn(sessionId, { line_idx: i, said, mode });
+      const r = await api.turn(sessionId, { line_idx: i, line_idxs: blockOf(i), said, mode });
       if (token !== run.current) return;
       await handleResult(i, r, token);
     } catch (e) {
@@ -163,15 +214,16 @@ export default function Rehearsal() {
     const endAt = performance.now();
     const lastWordAt = tb.current.lastWordAt();
     stopTurn();
-    listener.current?.commit();
     setHint(null);
     setLastSaid(said);
     if (!said) { toast("Não ouvi nada. Carrega no microfone para tentares outra vez."); return setPhase("waiting"); }
+    const after = nextOf(t.block[t.block.length - 1]);
+    clearFor(after);
     const sev = reason === "match" ? localVerdict({ expected: t.expected, said, strictness: session.strictness, memory: script.memory }) : null;
     if (!sev) return submit(t.i, said, "voz", t.token);
     setFeedback(null);
     pendingLat.current = { line: t.i, endAt, lastWordAt };
-    api.turn(sessionId, { line_idx: t.i, said, mode: "voz" }).then((r) => {
+    api.turn(sessionId, { line_idx: t.i, line_idxs: t.block, said, mode: "voz" }).then((r) => {
       if (r.memory_note) toast.success("Guardado na memória do texto", { description: r.memory_note.text });
       if (t.token !== run.current) return;
       if (r.advance) { if (r.turn.severity === "major") setFeedback(r.turn); return; }
@@ -181,7 +233,7 @@ export default function Rehearsal() {
       goIdx(t.i);
       handleResult(t.i, r, token);
     }).catch((e) => console.warn("[ensaio] verificação falhou", errMsg(e)));
-    runFrom(nextOf(t.i), t.token);
+    runFrom(after, t.token);
   };
 
   const nextHint = (t) => {
@@ -215,6 +267,7 @@ export default function Rehearsal() {
     if (!t || t.done) return;
     const text = tb.current.turnWords().join(" ");
     setLive(text);
+    if (t.words.length) setProgress(alignPos(t.words, splitWords(text)) / t.words.length);
     const norm = normTokens(text).join(" ");
     const helps = (norm.match(HELP_RE) || []).length;
     if (helps > t.helps && !(normTokens(t.expected).join(" ").match(HELP_RE) || []).length) { t.helps = helps; giveHint(t); }
@@ -237,10 +290,11 @@ export default function Rehearsal() {
     setHint(null);
     prefetch(nextOf(i));
     if (!voiceOn || !listener.current) { setLive(""); return; }
-    if (fresh) tb.current.reset();
-    const expected = lineText(lines[i]);
+    if (fresh) clearFor(i);
+    const block = blockOf(i);
+    const expected = blockText(block);
     stopTurn();
-    const t = { i, token, expected, words: splitWords(cleanForTts(expected)), hintEnd: 0, helps: 0, since: performance.now(), done: false };
+    const t = { i, block, token, expected, words: splitWords(cleanForTts(expected)), hintEnd: 0, helps: 0, since: performance.now(), done: false };
     t.timer = setInterval(() => tickRef.current(), 200);
     turn.current = t;
     setLive("");
@@ -254,8 +308,9 @@ export default function Rehearsal() {
     while (i < lines.length) {
       if (token !== run.current) return;
       const l = lines[i];
-      goIdx(i);
       if (l.kind !== "dialogue") { i = nextOf(i); continue; }
+      if (l.character !== mine && skipRef.current && !isCue(i)) { i = nextOf(i); continue; }
+      goIdx(i);
       if (l.character === mine) return listen(i, token, false);
       setPhase("ai");
       setHint(null);
@@ -265,6 +320,7 @@ export default function Rehearsal() {
       tb.current.reset();
       tb.current.echoStart(lineText(l), 2500);
       if (url) {
+        const poll = setInterval(() => setProgress(audioProgress()), 200);
         await playUrl(url, () => {
           const p = pendingLat.current;
           if (!p) return;
@@ -272,6 +328,7 @@ export default function Rehearsal() {
           const now = performance.now();
           lat({ type: "actorEnd→aiStart", line: i, ms_match_to_audio: Math.round(now - p.endAt), ms_lastword_to_audio: Math.round(now - p.lastWordAt) });
         });
+        clearInterval(poll);
       }
       tb.current.echoEnd(500);
       const lc = listener.current;
@@ -291,10 +348,11 @@ export default function Rehearsal() {
       onEngine: setEngine,
     });
     try {
-      await l.open();
       listener.current = l;
+      await l.open(hintsFrom(idxRef.current));
     } catch {
       l.close();
+      listener.current = null;
       toast.error("Sem acesso ao microfone. Podes continuar por escrito.");
       setVoiceOn(false);
     }
@@ -317,6 +375,8 @@ export default function Rehearsal() {
   const onText = (t) => {
     stopTurn();
     stopAudio();
+    const b = blockOf(idxRef.current);
+    clearFor(nextOf(b[b.length - 1]));
     submit(idxRef.current, t, "escrito", ++run.current);
   };
 
@@ -334,18 +394,91 @@ export default function Rehearsal() {
     stopTurn();
     setFeedback(null);
     goIdx(i);
+    clearFor(i);
     if (phase === "ready" || phase === "paused") { run.current++; return; }
     runFrom(i);
   };
 
+  const running = !["ready", "paused", "finishing"].includes(phase);
+
+  const jumpTo = (i) => {
+    const t0 = performance.now();
+    stopAudio();
+    stopTurn();
+    setFeedback(null);
+    goIdx(i);
+    clearFor(i);
+    if (running) runFrom(i);
+    else begin();
+    lat({ type: "jump", line: i, ms: Math.round(performance.now() - t0) });
+  };
+
+  const openEdit = (line) => {
+    const was = running;
+    run.current++;
+    stopAudio();
+    stopTurn();
+    listener.current?.setActive(false);
+    if (was) setPhase("paused");
+    setEditing({ line, was });
+  };
+
+  const saveEdit = async (line, patch) => {
+    try {
+      const sc = await api.patchLine(script.id, line.uid, patch);
+      setScript(sc);
+      toast.success(patch.kind === "cut" ? "Fala cortada" : "Alteração guardada no texto");
+      return true;
+    } catch {
+      toast.error("Não foi possível guardar a alteração");
+      return false;
+    }
+  };
+
+  const closeEdit = () => {
+    const was = editing?.was;
+    setEditing(null);
+    if (was) setResumeAt(idxRef.current);
+  };
+
+  const toggleSkip = () => setSkipMode((v) => {
+    skipRef.current = !v;
+    savePrefs(script.id, { skipMode: !v });
+    toast(!v ? "Modo Saltar ligado: só a deixa antes de cada fala tua" : "Modo Saltar desligado");
+    return !v;
+  });
+  const toggleText = () => setHideText((v) => { savePrefs(script.id, { hideText: !v }); return !v; });
+  const hintNow = () => (phase === "listening" && turn.current ? giveHint(turn.current) : setReveal(true));
+
+  keyRef.current = (e) => {
+    const el = e.target;
+    if (e.metaKey || e.ctrlKey || e.altKey || editing || showKeys) return;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(el?.tagName) || el?.isContentEditable || el?.closest?.("[role=dialog]")) return;
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if ((k === " " || k === "Enter") && el?.tagName === "BUTTON") return;
+    const act = {
+      ArrowRight: () => jump(1), ArrowLeft: () => jump(-1),
+      " ": () => (phase === "ready" || phase === "paused" ? begin() : pause()),
+      Enter: () => phase === "listening" && endTurn("manual"),
+      h: hintNow, e: () => lines[idxRef.current] && openEdit(lines[idxRef.current]), s: toggleSkip, t: toggleText, "?": () => setShowKeys(true),
+    }[k];
+    if (!act) return;
+    e.preventDefault();
+    act();
+  };
+
   if (!script) return null;
   const cur = lines[idx];
-  const isMine = cur?.character === mine;
+  const isMine = cur?.character === mine && cur?.kind === "dialogue";
+  const curBlock = isMine ? blockOf(idx) : [idx];
+  const myIdxs = lines.filter((l) => l.kind === "dialogue" && l.character === mine && (!plan || plan.includes(l.idx))).map((l) => l.idx);
+  const doneCount = myIdxs.filter((k) => k < idx || (k === idx && !isMine)).length;
+  const names = script.characters.map((c) => c.name);
   const showText = !isMine || !hideText || reveal;
   const myTurn = ["listening", "waiting", "interrupted"].includes(phase) && isMine;
 
   return (
-    <div className="max-w-7xl mx-auto px-6 md:px-10 py-8 grid lg:grid-cols-[1.25fr_1fr] gap-10">
+    <div className="max-w-7xl mx-auto px-6 md:px-10 pt-8 pb-36 grid lg:grid-cols-[1.25fr_1fr] gap-10">
       <section className="flex flex-col items-center gap-8 lg:min-h-[calc(100vh-8rem)]" data-testid="rehearsal-stage">
         <div className="w-full flex items-center justify-between">
           <div>
@@ -353,29 +486,39 @@ export default function Rehearsal() {
             <h1 className="font-serif text-2xl md:text-3xl font-semibold mt-1">{script.title} <span className="text-stone-500 font-normal">— {mine}</span></h1>
             {plan && <p data-testid="focus-mode-badge" className="mt-1 text-xs font-mono tracking-widest text-rose-300">ZONAS A REVER · {session.focus_idxs.length} FALAS (COM A DEIXA)</p>}
             <EngineBadge engine={engine} hintSeconds={session.hint_seconds || 5} />
+            <p data-testid="rehearsal-progress" className="mt-1 text-[10px] font-mono tracking-widest text-stone-500">
+              AS TUAS FALAS: {doneCount}/{myIdxs.length}{skipMode && <span data-testid="skip-mode-badge" className="ml-3 text-sky-400">MODO SALTAR</span>}
+            </p>
           </div>
           <Button data-testid="finish-rehearsal-btn" onClick={finish} disabled={phase === "finishing"} variant="outline" className="rounded-full border-rose-500/40 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200">
             <Flag className="w-4 h-4 mr-2" /> Terminar
           </Button>
         </div>
-        {notice && <p data-testid="eleven-permission-warning" className="w-full text-xs text-amber-300/90 border border-amber-500/20 rounded-lg px-3 py-2">{notice}</p>}
+        {notice && <p data-testid="stt-engine-notice" className="w-full text-xs text-amber-300/90 border border-amber-500/20 rounded-lg px-3 py-2">{notice}</p>}
 
-        <div className="w-full flex-1 flex flex-col items-center justify-center gap-8 py-6">
+        <div className="w-full flex-1 flex flex-col items-center justify-center gap-6 py-2">
           {cur && (
-            <div className="w-full text-center min-h-[140px]" data-testid="current-line">
-              <p className={`font-mono text-sm tracking-[0.3em] uppercase font-bold ${isMine ? "text-amber-400" : "text-sky-400"}`}>
-                {cur.kind === "direction" ? "Rubrica" : isMine ? "A tua fala" : cur.character}
-              </p>
-              <p data-testid="current-line-text" className={`font-serif text-2xl md:text-3xl leading-snug mt-4 text-stone-100 ${showText ? "transition-[filter] duration-300" : "blur-md select-none"}`}>
-                {lineText(cur)}
-              </p>
+            <div className="w-full text-center" data-testid="current-line">
+              <div className="flex items-center justify-center gap-3">
+                <p className={`font-mono text-sm tracking-[0.3em] uppercase font-bold ${isMine ? "text-amber-400" : "text-sky-400"}`}>
+                  {cur.kind !== "dialogue" ? "Rubrica" : isMine ? (curBlock.length > 1 ? `A tua fala · ${curBlock.length} falas seguidas` : "A tua fala") : cur.character}
+                </p>
+                <button data-testid="current-line-edit-btn" onClick={() => openEdit(cur)} title="Editar esta fala (E)" className="text-stone-500 hover:text-amber-400 transition-colors">
+                  <Pencil className="w-4 h-4" />
+                </button>
+              </div>
+              <ClipWindow testid="current-line-window" progress={progress}>
+                <div data-testid="current-line-text" data-block-size={curBlock.length} className={`font-serif text-2xl md:text-3xl leading-snug mt-4 text-stone-100 space-y-3 ${showText ? "transition-[filter] duration-300" : "blur-md select-none"}`}>
+                  {curBlock.map((k) => <p key={k} data-testid={`current-block-line-${k}`}>{lineText(lines[k])}</p>)}
+                </div>
+              </ClipWindow>
               {cur.edited_text && <p className="mt-2 text-[11px] font-mono tracking-widest text-emerald-400" data-testid="current-line-edited">ALTERAÇÃO ACORDADA</p>}
             </div>
           )}
           <MicButton phase={phase} level={level} onClick={onMic} />
           {phase === "listening" && voiceOn && (
             <Button data-testid="done-speaking-btn" onClick={() => endTurn("manual")} variant="outline" className="rounded-full border-amber-500/40 text-amber-300 hover:bg-amber-500/10">
-              <Check className="w-4 h-4 mr-2" /> Terminei
+              <Check className="w-4 h-4 mr-2" /> Terminei <Kbd>Enter</Kbd>
             </Button>
           )}
           {hint && phase === "listening" && <HintBox text={hint} />}
@@ -391,30 +534,49 @@ export default function Rehearsal() {
           )}
         </div>
 
-        <div className="w-full space-y-4">
-          <TextEntry onSubmit={onText} disabled={!myTurn && phase !== "speaking"} />
-          <div className="flex flex-wrap items-center justify-center gap-2">
-            <Ctl testid="prev-line-btn" onClick={() => jump(-1)} icon={SkipBack} label="Anterior" />
-            {phase === "ready" || phase === "paused"
-              ? <Ctl testid="play-btn" onClick={begin} icon={Play} label={phase === "ready" ? "Começar" : "Retomar"} accent />
-              : <Ctl testid="pause-btn" onClick={pause} icon={Pause} label="Pausa" />}
-            <Ctl testid="next-line-btn" onClick={() => jump(1)} icon={SkipForward} label="Seguinte" />
-            <Ctl testid="hint-btn" onClick={() => setReveal(true)} icon={Lightbulb} label="Dica" />
-            <Ctl testid="voice-toggle-btn" onClick={() => setVoiceOn((v) => !v)} icon={voiceOn ? Mic : MicOff} label={voiceOn ? "Voz ligada" : "Só escrita"} />
-            <Ctl testid="prompter-voice-toggle-btn" onClick={() => setPrompterVoice((v) => { localStorage.setItem("ensaio-prompter-voice", v ? "off" : "on"); return !v; })}
-              icon={prompterVoice ? Volume2 : VolumeX} label={prompterVoice ? "Apontador fala" : "Apontador mudo"} />
+        <div data-testid="rehearsal-controls" className="fixed bottom-0 inset-x-0 z-30 border-t border-white/[0.07] bg-[#0A0908]/90 backdrop-blur-xl">
+          <div className="max-w-7xl mx-auto px-6 md:px-10 py-3">
+            <div className="space-y-2.5">
+              <div className="max-w-3xl mx-auto"><TextEntry onSubmit={onText} disabled={!myTurn && phase !== "speaking"} /></div>
+              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                <Ctl testid="prev-line-btn" onClick={() => jump(-1)} icon={SkipBack} label="Anterior" k="←" />
+                {phase === "ready" || phase === "paused"
+                  ? <Ctl testid="play-btn" onClick={begin} icon={Play} label={phase === "ready" ? "Começar" : "Retomar"} accent k="Espaço" />
+                  : <Ctl testid="pause-btn" onClick={pause} icon={Pause} label="Pausa" k="Espaço" />}
+                <Ctl testid="next-line-btn" onClick={() => jump(1)} icon={SkipForward} label="Seguinte" k="→" />
+                <Ctl testid="hint-btn" onClick={hintNow} icon={Lightbulb} label="Dica" k="H" />
+                <Ctl testid="edit-current-btn" onClick={() => cur && openEdit(cur)} icon={Pencil} label="Editar" k="E" />
+                <Ctl testid="skip-mode-toggle-btn" onClick={toggleSkip} icon={FastForward} label={skipMode ? "Saltar: ligado" : "Modo Saltar"} k="S" on={skipMode} />
+                <Ctl testid="text-toggle-btn" onClick={toggleText} icon={hideText ? EyeOff : Eye} label={hideText ? "Texto escondido" : "Texto visível"} k="T" />
+                <Ctl testid="voice-toggle-btn" onClick={() => setVoiceOn((v) => !v)} icon={voiceOn ? Mic : MicOff} label={voiceOn ? "Voz ligada" : "Só escrita"} />
+                <Ctl testid="prompter-voice-toggle-btn" onClick={() => setPrompterVoice((v) => { localStorage.setItem("ensaio-prompter-voice", v ? "off" : "on"); return !v; })}
+                  icon={prompterVoice ? Volume2 : VolumeX} label={prompterVoice ? "Apontador fala" : "Apontador mudo"} />
+                <Ctl testid="shortcuts-btn" onClick={() => setShowKeys(true)} icon={Keyboard} label="Atalhos" k="?" />
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
-      <aside className="hidden lg:block rounded-2xl border border-white/[0.07] bg-[#141210]/70 backdrop-blur-xl p-4 h-[calc(100vh-8rem)] overflow-y-auto script-scroll sticky top-24" data-testid="rehearsal-script-panel">
-        <ScriptView lines={plan ? lines.filter((l) => plan.includes(l.idx)) : lines} myCharacter={mine} currentIdx={idx} hideMine={hideText} revealIdx={reveal ? idx : -1} />
+      <aside className="hidden lg:block rounded-2xl border border-white/[0.07] bg-[#141210]/70 backdrop-blur-xl p-4 h-[calc(100vh-14rem)] overflow-y-auto script-scroll sticky top-24" data-testid="rehearsal-script-panel">
+        <p className="text-[10px] font-mono tracking-widest text-stone-600 px-2 pb-2">CLICA NUMA FALA PARA SALTAR PARA AQUI OU EDITAR</p>
+        <ScriptView lines={plan ? lines.filter((l) => plan.includes(l.idx)) : lines} myCharacter={mine} currentIdx={idx} hideMine={hideText} revealIdx={reveal ? idx : -1}
+          hideForeign onJump={jumpTo} onEdit={openEdit} />
       </aside>
+      {editing && <LineEditor line={editing.line} names={names} onSave={saveEdit} onClose={closeEdit} />}
+      {showKeys && <ShortcutsOverlay onClose={() => setShowKeys(false)} />}
     </div>
   );
 }
 
 const lineText = (l) => l.edited_text || l.text;
+
+const blockHints = (text) => {
+  const clean = cleanForTts(text);
+  const words = clean.toLowerCase().replace(/[^\p{L}\p{N}\s-]/gu, " ").split(/\s+/).filter((w) => w.replace(/-/g, "").length >= 3);
+  const phrases = clean.split(/[.!?;]+/).map((p) => p.trim()).filter((p) => p.split(" ").length > 1);
+  return [...new Set(words), ...phrases];
+};
 
 function buildPlan(lines, focus, mine) {
   const steps = new Set();
@@ -428,14 +590,16 @@ function buildPlan(lines, focus, mine) {
   return [...steps].sort((a, b) => a - b);
 }
 
-const Ctl = ({ testid, onClick, icon: Icon, label, accent }) => (
+const Ctl = ({ testid, onClick, icon: Icon, label, accent, k, on }) => (
   <button
     data-testid={testid}
-    onClick={onClick}
-    className={`flex items-center gap-2 px-4 h-10 rounded-full text-sm border transition-colors ${
-      accent ? "bg-amber-500 text-[#0A0908] border-amber-500 hover:bg-amber-400" : "border-white/10 text-stone-300 hover:text-amber-400 hover:border-amber-500/40"
+    onClick={(e) => { e.currentTarget.blur(); onClick(); }}
+    className={`flex items-center gap-1.5 px-3 h-9 rounded-full text-xs border transition-colors ${
+      accent ? "bg-amber-500 text-[#0A0908] border-amber-500 hover:bg-amber-400"
+        : on ? "border-sky-400/60 text-sky-300 bg-sky-500/10"
+        : "border-white/10 text-stone-300 hover:text-amber-400 hover:border-amber-500/40"
     }`}
   >
-    <Icon className="w-4 h-4" /> {label}
+    <Icon className="w-4 h-4" /> {label}{k && <Kbd>{k}</Kbd>}
   </button>
 );

@@ -1,0 +1,14 @@
+{"iteration":2,"phase":"3","passed":10,"failed":0,"retest_needed":false,"bugs":[],
+"action_items":[{"type":"note","detail":"Real microphone/speech not testable headless; text-input fallback used. Engine label in headless showed 'MICROFONE FECHADO' (no mic device)."},{"type":"note","detail":"Real AI audio voice for reassigned character (JRN-30 'spoken in GARY voice') requires human listening verification."}],
+"checks":[
+{"criterion":"JRN-29/30/31 in-rehearsal edit (API)","name":"backend/e1_tests/test_tscheck_line_patch.py","lane":"backend","status":"passed","evidence":"PATCH /api/scripts/{id}/lines/{uid} text/character/kind=cut -> 200, GET reflects; kind=bogus -> 422; PUT /lines bulk kinds persisted. Full suite 11 passed"},
+{"criterion":"JRN-29/30/31 in-rehearsal edit","name":"rehearsal-inline-edit-persists","lane":"browser","status":"passed","evidence":"Edited text, reassigned RUI->ANA, cut line; after reload /texto shows new text, data-kind=cut + line-through; API char=ANA"},
+{"criterion":"JRN-32 failed save","name":"rehearsal-failed-save-keeps-line","lane":"browser","status":"passed","evidence":"PATCH routed to 500 -> toast 'Não foi possível guardar a alteração'; line text unchanged in UI and API"},
+{"criterion":"JRN-33 jump","name":"rehearsal-jump-here","lane":"browser","status":"passed","evidence":"Saltar para aqui on line 21 -> current line + listening in 88 ms"},
+{"criterion":"JRN-34/35 Modo Saltar","name":"rehearsal-skip-mode","lane":"browser","status":"passed","evidence":"Seq [0,2,3,4,5,6,8,9]: skip on skips 1; S off at line 3 plays 4,5; S on at 6 skips 7, plays cue 8"},
+{"criterion":"JRN-36/37 layout","name":"rehearsal-layout-group-longline","lane":"browser","status":"passed","evidence":"lines 1,2 grouped w/o name header; long line (>1000ch) window 170px, scrollHeight 1168; next-btn box identical (387,630,134x36)"},
+{"criterion":"JRN-38 shortcuts","name":"rehearsal-keyboard-shortcuts","lane":"browser","status":"passed","evidence":"→ ← S T ? E Space H Enter all act; typing 'sst?' in editor and 'st ?' in text entry triggered nothing"},
+{"criterion":"JRN-39 editor kinds","name":"editor-line-kinds-bulk","lane":"browser","status":"passed","evidence":"Options Fala/Rubrica/Texto não pertencente/Cortada; bulk 3->direction saved; foreign hidden in rehearsal panel; cut struck through and skipped by →"},
+{"criterion":"JRN-40 paste regression","name":"new-script-paste-detects-characters","lane":"browser","status":"passed","evidence":"Via preview URL ingress: pasted script -> MARTA, PEDRO detected"},
+{"criterion":"JRN-41 A Espera regression","name":"rehearsal-text-fallback-summary","lane":"browser","status":"passed","evidence":"Engine label shown, text turn advanced to next line, summary-score rendered"}
+]}

@@ -1,0 +1,15 @@
+{"passed":8,"failed":0,"bugs":[],
+"action_items":[{"type":"human_verification","severity":"medium","detail":"Headless Chromium has no microphone, so the badge stayed on 'Microfone fechado'. Not verified in the UI: the 'Escuta: Deepgram' label, switching to the next engine when one fails, the live transcript starting empty for each block, real speech accuracy, speaker echo and latency. The backend side passed: both engines are available and the tokens do not contain the raw keys."},
+{"type":"note","severity":"low","detail":"The 'Falta a chave <motor> no ficheiro backend/.env' message was not tested, because both keys are set and testers must not edit the .env file."},
+{"type":"note","severity":"low","detail":"The seed script 'A Espera' has no consecutive lines for any one character, so the block test used its own script tscheck-blk-*."}],
+"retest_needed":false,
+"checks":[
+{"criterion":"JRN-16/23/24 engine selection + failover","name":"test_tscheck_engines.py","lane":"backend","status":"passed","evidence":"GET /api/stt/engines 200 order=[deepgram,gemini,webspeech]; POST deepgram-token / gemini-token 200 with JWT/auth_tokens value, raw key not in the body"},
+{"criterion":"JRN-17 phonetic matching","name":"test_tscheck_phonetic.py","lane":"backend","status":"passed","evidence":"turn 'Ainda tás aqui...' and the line with 'à' changed to 'há' -> differences=[], severity none, accuracy 100"},
+{"criterion":"JRN-18/19 report only real errors","name":"test_tscheck_real_errors.py","lane":"backend","status":"passed","evidence":"correct lightly distorted session: finish 200, all turns differences=[]; 'não'->'sempre' and a skipped sentence -> differences non-empty"},
+{"criterion":"JRN-20/21 blocks","name":"test_tscheck_blocks.py","lane":"backend","status":"passed","evidence":"own script with 2 RUI lines and a direction between them; turn line_idxs=[1,3] judged once, differences=[], session has 1 turn"},
+{"criterion":"JRN-26 voices","name":"test_tscheck_voices.py","lane":"backend","status":"passed","evidence":"3 characters on pt-PT Duarte/Raquel with distinct pitch/rate combos; POST /api/tts 200 x-tts-provider: edge, audio/mpeg"},
+{"criterion":"JRN-26 voices","name":"voices-tab-edge","lane":"browser","status":"passed","evidence":"Vozes tab shows rows for JOÃO, MARTA, CHEFE DA ESTAÇÃO; MARTA preview -> /api/tts 200 header edge"},
+{"criterion":"JRN-28 openapi","name":"test_tscheck_openapi.py","lane":"backend","status":"passed","evidence":"GET /api/openapi.json 200"},
+{"criterion":"Regression rehearsal flow","name":"rehearsal-text-fallback-summary","lane":"browser","status":"passed","evidence":"Library -> A Espera -> JOÃO -> start -> Começar -> typed line submitted -> next line shown -> Terminar -> /resumo with summary-score. Engine badge headless: 'Microfone fechado'"}
+]}

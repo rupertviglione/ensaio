@@ -18,13 +18,13 @@ export const TextEntry = ({ onSubmit, disabled }) => {
         onChange={(e) => setV(e.target.value)}
         disabled={disabled}
         placeholder="Escreve a tua fala ou uma nota…"
-        className="h-12 bg-[#141210] rounded-full px-5"
+        className="h-10 bg-[#141210] rounded-full px-5"
       />
       <button
         type="submit"
         data-testid="text-entry-submit"
         disabled={disabled}
-        className="h-12 w-12 shrink-0 rounded-full bg-amber-500 text-[#0A0908] flex items-center justify-center hover:bg-amber-400 transition-colors disabled:opacity-40"
+        className="h-10 w-10 shrink-0 rounded-full bg-amber-500 text-[#0A0908] flex items-center justify-center hover:bg-amber-400 transition-colors disabled:opacity-40"
       >
         <SendHorizontal className="w-5 h-5" />
       </button>
@@ -44,11 +44,11 @@ export const HintBox = ({ text }) => (
   </div>
 );
 
-const ENGINE = { scribe: "Escuta em tempo real · ElevenLabs Scribe", webspeech: "Escuta do browser (motor anterior)", none: "Sem reconhecimento de voz" };
+const ENGINE = { deepgram: "Escuta: Deepgram", gemini: "Escuta: Gemini", webspeech: "Escuta do browser", scribe: "Escuta: ElevenLabs Scribe", none: "Sem reconhecimento de voz" };
 
 export const EngineBadge = ({ engine, hintSeconds }) => (
-  <p data-testid="stt-engine-badge" className="mt-1 text-[10px] font-mono tracking-widest text-stone-500 uppercase">
-    {engine ? ENGINE[engine] : "Microfone fechado"} · dica após {hintSeconds}s de silêncio
+  <p data-testid="stt-engine-badge" data-engine={engine || "closed"} className="mt-1 text-[10px] font-mono tracking-widest text-stone-500 uppercase">
+    <span className={engine && engine !== "none" ? "text-emerald-400" : ""} data-testid="stt-engine-name">{engine ? ENGINE[engine] : "Microfone fechado"}</span> · dica após {hintSeconds}s de silêncio
   </p>
 );
 

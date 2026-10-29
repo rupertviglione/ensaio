@@ -142,6 +142,9 @@ export default function Summary() {
         {sm.differences?.length ? (
           <ul>{sm.differences.map((d, i) => <DiffRow key={i} d={d} i={i} script={script} onSaved={() => api.getScript(script.id).then(setScript)} />)}</ul>
         ) : <p className="text-stone-400">Nenhuma diferença. Texto dito tal e qual.</p>}
+        {st.discarded > 0 && (
+          <p data-testid="summary-discarded" className="mt-4 text-xs text-stone-500">{st.discarded} {st.discarded === 1 ? "diferença do reconhecimento de voz foi descartada" : "diferenças do reconhecimento de voz foram descartadas"} (soavam como o texto).</p>
+        )}
       </Block>
 
       <div className="grid md:grid-cols-2 gap-8">

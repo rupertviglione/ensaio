@@ -12,15 +12,23 @@ cd backend
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
 ```
-Cria/edita `backend/.env`:
+Copia `backend/.env.example` para `backend/.env` e preenche:
 ```
 MONGO_URL="mongodb://localhost:27017"
 DB_NAME="ensaio"
 CORS_ORIGINS="*"
 EMERGENT_LLM_KEY=a-tua-chave-universal-emergent
-ELEVENLABS_API_KEY=a-tua-chave-elevenlabs
+DEEPGRAM_API_KEY=a-tua-chave-deepgram
+GEMINI_API_KEY=a-tua-chave-gemini-ai-studio
+ELEVENLABS_API_KEY=
 ```
-`ELEVENLABS_API_KEY` (https://elevenlabs.io/app/settings/api-keys) é a chave **secreta** `sk_…` (51 caracteres), não o ID da chave. Permissões: **Text to Speech**, **Speech to Text** e **Single-use tokens** (obrigatórias para vozes pt-PT e escuta em tempo real); **Voices → Read/Write** (opcional: a app procura e adiciona vozes pt-PT da biblioteca; sem isso usa uma lista pt-PT verificada). O backend verifica as permissões ao arrancar (`GET /api/eleven/status?refresh=true`) e mostra "Chave ElevenLabs sem permissão para …" com recurso ao motor anterior (OpenAI TTS / reconhecimento do browser). Opcional: `ELEVEN_TTS_MODEL` (por defeito `eleven_multilingual_v2`; `eleven_v3` também suportado). A chave nunca vai para o frontend: o browser recebe apenas tokens Scribe de uso único (`POST /api/stt/token`).
+- `DEEPGRAM_API_KEY` (https://console.deepgram.com → API Keys, crédito grátis): escuta principal (nova-3, pt-PT, streaming). O browser recebe só um token temporário (`POST /api/stt/deepgram-token`, 120 s).
+- `GEMINI_API_KEY` (https://aistudio.google.com/apikey, formato `AQ.…` ou `AIza…`): escuta de reserva (Gemini Live `gemini-3.5-transcribe-live`). O browser recebe só um token efémero de uso único (`POST /api/stt/gemini-token`).
+- Sem chave Deepgram/Gemini a app mostra "Falta a chave <motor> no ficheiro backend/.env" e passa ao motor seguinte (Deepgram → Gemini → reconhecimento do browser).
+- Vozes: Microsoft Edge pt-PT (`edge-tts`, grátis, sem chave). Reserva: OpenAI gpt-4o-mini-tts via `EMERGENT_LLM_KEY` (registado no log como `TTS FALLBACK`).
+- `ELEVENLABS_API_KEY` é opcional (gasta créditos): só é usada se escolheres manualmente "ElevenLabs" para uma personagem no separador Vozes. A escuta ElevenLabs Scribe também é opcional: no browser, `localStorage.setItem("ensaio-stt","scribe")`.
+- Opcional: `DEEPGRAM_MODEL` (defeito `nova-3`), `GEMINI_LIVE_MODEL` (defeito `gemini-3.5-transcribe-live`).
+- Nenhuma chave vai para o browser.
 Arranca:
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8001 --reload
@@ -31,7 +39,7 @@ uvicorn server:app --host 0.0.0.0 --port 8001 --reload
 cd frontend
 yarn install
 ```
-Cria/edita `frontend/.env`:
+Copia `frontend/.env.example` para `frontend/.env`:
 ```
 REACT_APP_BACKEND_URL=http://localhost:8001
 ```
@@ -44,8 +52,10 @@ Abre http://localhost:3000 (o microfone funciona em `localhost` sem HTTPS). Usa 
 ## Como usar
 1. **Carregar texto**: cola o texto ou carrega PDF / Word (.docx) / .txt. Formato ideal: `NOME: fala` ou nome numa linha e a fala por baixo; rubricas entre parêntesis.
 2. No texto: escolhe **o teu papel**, escreve **como queres ser corrigido**, ajusta **vozes** por personagem, e podes clicar "Começar aqui" numa fala.
-3. **Sala de ensaio**: o microfone abre uma vez e fica aberto (ElevenLabs Scribe v2 Realtime, transcrição palavra a palavra). A IA diz as falas das outras personagens (vozes ElevenLabs pt-PT pré-geradas); a tua fala só termina quando dizes as últimas palavras ou carregas em **Terminei** — nunca por silêncio. Se ficares calado (por defeito 5 s, configurável 3–15 s em "Preparar ensaio"), o apontador diz e mostra as próximas palavras e continua a ouvir-te. Funciona com auscultadores ou colunas (o eco da voz da IA é ignorado). Latências no console do browser (`[ensaio:latência]`, `window.__ensaioLatency`). Podes dizer coisas como *"aí mudámos, agora digo X em vez de Y"* — fica guardado na **Memória** do texto. Pede ajuda com *"texto!"*.
-4. **Terminar** → resumo com tudo o que foi diferente do texto, zonas a rever e dicas de memorização.
+3. **Sala de ensaio**: o microfone abre uma vez e fica aberto (motor indicado no ecrã: "Escuta: Deepgram" / "Escuta: Gemini" / "Escuta do browser"; troca automática sem perder palavras). As tuas falas seguidas (mesmo com rubricas pelo meio) são um só bloco: a app ouve-te através das pausas e só avalia no fim do bloco; a transcrição recomeça vazia em cada bloco. O que soa como o texto conta como o texto (comparação fonética pt-PT); as diferenças duvidosas são confirmadas em segundo plano e o resumo final só mostra diferenças reais. A IA diz as falas das outras personagens (vozes Edge pt-PT pré-geradas); o bloco só termina quando dizes as últimas palavras ou carregas em **Terminei** — nunca por silêncio. Se ficares calado (por defeito 5 s, configurável 3–15 s em "Preparar ensaio"), o apontador diz e mostra as próximas palavras e continua a ouvir-te. Funciona com auscultadores ou colunas (o eco da voz da IA é ignorado). Latências no console do browser (`[ensaio:latência]`, `window.__ensaioLatency`). Podes dizer coisas como *"aí mudámos, agora digo X em vez de Y"* — fica guardado na **Memória** do texto. Pede ajuda com *"texto!"*.
+4. **Durante o ensaio**: clica numa fala do texto à direita para **Saltar para aqui** ou **Editar** (texto, personagem com um clique, "Cortada" — fica guardado no texto). **Modo Saltar** (no "Preparar ensaio" ou tecla S): só se ouve a deixa antes de cada fala tua. Atalhos: → seguinte, ← anterior, Espaço pausa, Enter Terminei, H dica, E editar, S Modo Saltar, T mostrar/esconder texto, ? lista. No editor do Guião há os tipos Fala / Rubrica / Texto não pertencente (números de página, cabeçalhos — ignorados no ensaio) / Cortada, e selecção múltipla.
+5. **Terminar** → resumo com tudo o que foi diferente do texto, zonas a rever e dicas de memorização.
 
 ## Tecnologia
-FastAPI + MongoDB + React. IA: Claude Sonnet 5.5 / Haiku 5.5 (avaliação e resumo, chave universal Emergent); ElevenLabs eleven_multilingual_v2 (vozes pt-PT) e Scribe v2 Realtime (escuta); OpenAI gpt-4o-mini-tts e Web Speech apenas como recurso.
+FastAPI + MongoDB + React. IA: Claude Sonnet 5.5 / Haiku 5.5 (avaliação, confirmação de diferenças e resumo, chave universal Emergent); escuta Deepgram nova-3 (principal), Gemini Live (reserva), Web Speech (último recurso); vozes Microsoft Edge pt-PT (edge-tts), OpenAI gpt-4o-mini-tts como reserva, ElevenLabs opcional.
+Teste automático de leitura correcta (áudio sintetizado → STT real → relatório): `cd backend && python tests/readthrough_phase2.py deepgram MARTA` (ou `gemini JOÃO`).

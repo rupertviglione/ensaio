@@ -45,7 +45,29 @@ App para treinar e decorar texto (actores, utilizador único). Carregar texto (c
 - Instrumentação: console `[ensaio:latência]` e `window.__ensaioLatency` (fim do actor → início do áudio IA; fim do áudio IA → captura activa)
 - /api/openapi.json e /api/docs
 
+## Round 6 / Phase 2 (2026-10-29) — escuta fiel e grátis, blocos, vozes Edge
+- .env recriados (backend: MONGO_URL, DB_NAME, CORS_ORIGINS, EMERGENT_LLM_KEY, DEEPGRAM_API_KEY, GEMINI_API_KEY, ELEVENLABS_API_KEY; frontend: REACT_APP_BACKEND_URL) + `.env.example` (backend e frontend) + README
+- Escuta (F-11): Deepgram nova-3 pt-PT streaming no browser com token temporário (`POST /api/stt/deepgram-token`, /v1/auth/grant, 120 s, subprotocolo bearer) + keyterms do bloco; reserva Gemini Live `gemini-3.5-transcribe-live` (token efémero v1alpha via google-genai, `POST /api/stt/gemini-token`, customVocabulary + languageCodes pt-PT); último recurso Web Speech; ElevenLabs Scribe só opt-in (`localStorage ensaio-stt=scribe`). Um socket por bloco; áudio em fila durante (re)ligação e passado ao motor seguinte na troca; texto já captado mantido. Badge "Escuta: Deepgram / Gemini / do browser". `GET /api/stt/engines`; chave em falta → "Falta a chave <motor> no ficheiro backend/.env"
+- Correspondência (F-12/F-13): backend/matching.py (+ espelho frontend/src/lib/match.js): chave fonética pt-PT (h, ss/ç/c(e,i)/s, ch/x, lh/nh, qu/gu, vogais finais, -am/-ão, ou/o, ei/e, esqueleto consonântico), junções/separações de palavras; diferenças candidatas confirmadas em segundo plano (Claude haiku, CONFIRM_SYSTEM) sem atrasar a resposta; negações sempre reais; relatório final só com diferenças "real" (score = média final_accuracy; stats.discarded)
+- Blocos (F-14): falas seguidas da personagem (rubricas pelo meio) = um bloco (`line_idxs` na /turn; diferenças atribuídas à fala certa); TranscriptBuffer.clear + Listener.clear entre blocos; texto do bloco anterior que reapareça é ignorado
+- Latência (F-15): veredicto local → IA arranca logo; verificação no servidor em paralelo (inalterado)
+- Vozes (F-16): Edge TTS (edge-tts) pt-PT-RaquelNeural / pt-PT-DuarteNeural (lista verificada: só estas 2 pt-PT existem; Fernanda já não existe) com tom/ritmo distintos por personagem; apontador Raquel +4Hz +12%; cache ed_; reserva OpenAI (log "TTS FALLBACK"); ElevenLabs só manual. Separador Vozes: motor, voz, TOM, RITMO, pré-visualização, aviso de duplicados. Personagens migradas no arranque
+- Verificado no pod: Deepgram grant + streaming ✓, Gemini token + Live transcription ✓, Edge TTS ✓. Leitura correcta sintetizada (tests/readthrough_phase2.py): Deepgram MARTA 0 erros falsos, Deepgram JOÃO 1 (ASR omitiu "não"), Gemini JOÃO 0
+- Testes: tests/test_ensaio_phase2.py 18/18; iteração 6 frontend 100%
+
+## Round 6 / Phase 3 (2026-10-29) — edição e navegação no ensaio
+- Backend: tipos de linha `dialogue` / `direction` / `foreign` (texto não pertencente) / `cut` (cortada, mantém a personagem); `PATCH /api/scripts/{id}/lines/{uid}` (texto, personagem, tipo; limpa a ligação de memória se o texto mudar); `save_lines` partilhado com PUT; parse inalterado
+- Ensaio: editar a fala actual ou qualquer fala (botão lápis, E, ou clicar no painel → Editar): personagem com 1 clique (guarda logo), texto, "Cortada"/"Repor fala"; escuta em pausa durante a edição e o ensaio retoma na fala editada; blocos recalculados e TTS gerado na hora (cache por uid+personagem+texto); falha → "Não foi possível guardar a alteração"
+- Cortadas riscadas e saltadas; "texto não pertencente" escondido e saltado; Guião: tipo por linha + selecção múltipla (tipo/personagem)
+- Clicar numa fala → "Saltar para aqui" (~130 ms); Modo Saltar (switch no Preparar ensaio, botão, tecla S): só a deixa antes de cada bloco do actor
+- Agrupamento de falas seguidas da mesma personagem; janela fixa de 170 px com revelação progressiva (progresso do áudio IA / alinhamento do actor); barra de controlos fixa em baixo (0 px de movimento)
+- Atalhos → ← Espaço Enter H E S T ? (kbd nos botões, overlay, desligados ao escrever)
+- Melhorias F-23: contador "AS TUAS FALAS x/y", distintivo MODO SALTAR, toasts ao ligar/desligar, T/S lembrados por texto, "Repor fala", latência de salto em window.__ensaioLatency, painel lateral rola por dentro (o cabeçalho não se mexe), botões perdem o foco após clique (Espaço/Enter ficam para os atalhos)
+- Testes: tests/test_ensaio_phase3.py 13/13 + phase2 18/18; iteração 7 frontend 100%
+
 ## Backlog
+- Teste humano com microfone real (Deepgram/Gemini, failover a meio do bloco, colunas do portátil)
+- P2: dividir server.py em módulos (scripts, vozes, sessões)
 - P1: aplicar notas da memória visualmente no guião (texto alterado em linha)
 - P1: editar manualmente falas/personagens após o parse
 - P2: ensaiar só as zonas a rever; histórico de evolução por texto; streaming de áudio para menor latência

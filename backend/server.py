@@ -7,9 +7,7 @@ import hashlib
 import asyncio
 import logging
 import tempfile
-import difflib
 import time
-import unicodedata
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Optional, Annotated, Literal
@@ -28,6 +26,9 @@ from bson import ObjectId  # noqa: E402
 from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone  # noqa: E402
 from emergentintegrations.llm.openai import OpenAITextToSpeech, OpenAISpeechToText  # noqa: E402
 import eleven  # noqa: E402
+import edge_voices  # noqa: E402
+import speech  # noqa: E402
+from matching import norm_tokens, local_match, fast_verdict, final_accuracy, NEGATIONS  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ensaio")
@@ -93,6 +94,10 @@ class Character(BaseModel):
     style: str = ""
     el_voice_id: Optional[str] = None
     el_voice_name: str = ""
+    tts: Literal["edge", "openai", "elevenlabs"] = "edge"
+    edge_voice: str = ""
+    edge_pitch: int = Field(0, ge=-50, le=50)
+    edge_rate: int = Field(0, ge=-50, le=50)
 
 
 class MemoryNote(BaseModel):
@@ -116,7 +121,11 @@ class Script(BaseDocument):
 
 
 class Turn(BaseModel):
+    id: str = Field(default_factory=short_id)
     line_idx: int
+    line_idxs: List[int] = []
+    review: str = "done"
+    final_accuracy: Optional[float] = None
     expected: str
     said: str
     mode: str = "voz"
@@ -313,7 +322,7 @@ class LineIn(BaseModel):
     uid: Optional[str] = None
     character: Optional[str] = None
     text: str
-    kind: Literal["dialogue", "direction"] = "dialogue"
+    kind: Literal["dialogue", "direction", "foreign", "cut"] = "dialogue"
 
 
 class LinesIn(BaseModel):
@@ -331,6 +340,10 @@ class TTSIn(BaseModel):
     character: Optional[str] = None
     style: str = ""
     el_voice_id: Optional[str] = None
+    tts: Optional[str] = None
+    edge_voice: Optional[str] = None
+    edge_pitch: int = 0
+    edge_rate: int = 0
 
 
 class SessionIn(BaseModel):
@@ -345,6 +358,7 @@ class SessionIn(BaseModel):
 
 class TurnIn(BaseModel):
     line_idx: int
+    line_idxs: List[int] = []
     said: str
     mode: str = "voz"
 
@@ -454,7 +468,7 @@ async def create_script(body: ScriptIn):
     if not any(ln.kind == "dialogue" for ln in lines):
         raise HTTPException(422, "Não consegui identificar falas e personagens neste texto.")
     s = Script(title=body.title.strip() or "Sem título", author=body.author, raw_text=body.text, lines=lines, characters=chars)
-    assign_default_eleven(s)
+    assign_edge(s)
     res = await db.scripts.insert_one(s.to_mongo())
     s.id = str(res.inserted_id)
     return script_out(s)
@@ -465,37 +479,70 @@ async def read_script(script_id: str):
     return script_out(await get_script(script_id))
 
 
-@api.put("/scripts/{script_id}/lines")
-async def update_lines(script_id: str, body: LinesIn):
-    script = await get_script(script_id)
-    lines = []
-    for x in body.lines:
-        text = x.text.strip()
-        if not text:
-            continue
-        char = (x.character or "").strip().upper() or None
-        kind = x.kind if char or x.kind == "direction" else "direction"
-        lines.append(Line(uid=x.uid or short_id(), idx=len(lines), character=char if kind == "dialogue" else None, text=text, kind=kind))
+SPOKEN_KINDS = ("dialogue", "cut")
+
+
+def make_line(uid: Optional[str], idx: int, character: Optional[str], text: str, kind: str) -> Line:
+    char = (character or "").strip().upper() or None
+    if kind in SPOKEN_KINDS and not char:
+        kind = "direction"
+    return Line(uid=uid or short_id(), idx=idx, character=char if kind in SPOKEN_KINDS else None, text=text, kind=kind)
+
+
+async def save_lines(script: Script, lines: List[Line]) -> dict:
     if not any(ln.kind == "dialogue" for ln in lines):
         raise HTTPException(400, "O texto tem de ter pelo menos uma fala.")
     existing = {c.name: c for c in script.characters}
     names = []
     for ln in lines:
-        if ln.kind == "dialogue" and ln.character not in names:
+        if ln.kind in SPOKEN_KINDS and ln.character and ln.character not in names:
             names.append(ln.character)
     used = {c.voice for c in script.characters}
     free = [v for v in VOICES if v not in used] or VOICES
-    chars = []
-    for i, n in enumerate(names):
-        chars.append(existing.get(n) or Character(name=n, voice=free[i % len(free)]))
+    chars = [existing.get(n) or Character(name=n, voice=free[i % len(free)]) for i, n in enumerate(names)]
     script.lines, script.characters = lines, chars
-    assign_default_eleven(script)
+    assign_edge(script)
     uids = {ln.uid for ln in lines}
     script.memory = [m for m in script.memory if not m.line_uid or m.line_uid in uids]
-    await db.scripts.update_one({"_id": oid(script_id)}, {"$set": {
+    await db.scripts.update_one({"_id": oid(script.id)}, {"$set": {
         "lines": [ln.model_dump() for ln in lines], "characters": [c.model_dump() for c in chars],
         "memory": [m.model_dump() for m in script.memory]}})
     return script_out(script)
+
+
+@api.put("/scripts/{script_id}/lines")
+async def update_lines(script_id: str, body: LinesIn):
+    script = await get_script(script_id)
+    lines = [x for x in body.lines if x.text.strip()]
+    return await save_lines(script, [make_line(x.uid, i, x.character, x.text.strip(), x.kind) for i, x in enumerate(lines)])
+
+
+class LinePatch(BaseModel):
+    text: Optional[str] = None
+    character: Optional[str] = None
+    kind: Optional[Literal["dialogue", "direction", "foreign", "cut"]] = None
+
+
+@api.patch("/scripts/{script_id}/lines/{uid}")
+async def patch_line(script_id: str, uid: str, body: LinePatch):
+    """Edits one line (text, character, kind) — used from the rehearsal room."""
+    script = await get_script(script_id)
+    ln = next((x for x in script.lines if x.uid == uid), None)
+    if not ln:
+        raise HTTPException(404, "Fala não encontrada")
+    text = body.text.strip() if body.text is not None else ln.text
+    if not text:
+        raise HTTPException(400, "O texto não pode ficar vazio.")
+    if body.text is not None and text != effective_text(script, ln):
+        for m in script.memory:
+            if m.line_uid == uid and m.new_text:
+                m.line_uid, m.new_text = None, None
+    kind = body.kind or ln.kind
+    character = body.character if body.character is not None else ln.character
+    if body.character and kind in ("direction", "foreign"):
+        kind = "dialogue"
+    lines = [make_line(x.uid, x.idx, character, text, kind) if x.uid == uid else x for x in script.lines]
+    return await save_lines(script, lines)
 
 
 @api.post("/scripts/{script_id}/rename-character")
@@ -523,7 +570,8 @@ async def rename_character(script_id: str, body: RenameIn):
 @api.put("/scripts/{script_id}")
 async def update_script(script_id: str, body: ScriptUpdate):
     await get_script(script_id)
-    if body.characters and any(c.voice not in VOICES for c in body.characters):
+    if body.characters and any(c.voice not in VOICES or (c.edge_voice and c.edge_voice not in edge_voices.ids())
+                               for c in body.characters):
         raise HTTPException(400, "Voz inválida")
     upd = body.model_dump(exclude_none=True)
     if upd:
@@ -580,6 +628,7 @@ PREMADE_IDS = {
     "pFZP5JQG7iQjIQuC4Bku", "TX3LPaxmHKxFdv7VOQHJ", "Xb7hH8MSUJpSbSDYk0k2", "N2lVS1w4EtoT3dr4eOWO", "SAz9YHcvj6GT2YYXdXww",
     "onwK4e9ZLuTAKqWVaz9q",
 }
+TTS_STATS = {"edge": 0, "elevenlabs": 0, "openai_fallback": 0, "fallback_reasons": []}
 
 
 def tts_instructions(character: Optional[str], style: str) -> str:
@@ -611,61 +660,65 @@ async def _generate_openai(text: str, voice: str, instructions: str) -> bytes:
     return b"".join(await asyncio.gather(*[one(p) for p in eleven.split_text(text, 1500)]))
 
 
-def prompter_voice_id() -> Optional[str]:
-    return (CATALOG.get("prompter") or {}).get("id")
+def tts_cfg(c: Optional[Character]) -> dict:
+    if c is None:
+        return {"character": None, "voice": PROMPTER_VOICE, "style": "", "tts": "edge", "el_voice_id": None, **edge_voices.PROMPTER}
+    return {"character": c.name, "voice": c.voice, "style": c.style, "tts": c.tts, "el_voice_id": c.el_voice_id,
+            "edge_voice": c.edge_voice or edge_voices.VOICES[0]["id"], "edge_pitch": c.edge_pitch, "edge_rate": c.edge_rate}
 
 
-def _fallback_reason(vid: Optional[str]) -> str:
-    if not eleven.KEY:
-        return "sem chave ElevenLabs"
-    if not vid:
-        return "personagem sem voz ElevenLabs"
-    return "chave ElevenLabs sem permissão TTS" if not eleven.can("tts") else ""
+def _cached(path: Path, gen):
+    async def run():
+        if path.exists():
+            return path.read_bytes()
+        audio = await gen()
+        path.write_bytes(audio)
+        return audio
+    return run
 
 
-async def synth(text: str, voice: str, character: Optional[str] = None, style: str = "",
-                el_voice_id: Optional[str] = None) -> tuple:
+async def _synth_job(text: str, cfg: dict) -> tuple:
+    h = lambda *p: hashlib.sha256("|".join(map(str, (text,) + p)).encode()).hexdigest()  # noqa: E731
+    vid = None if cfg["el_voice_id"] in PREMADE_IDS else cfg["el_voice_id"]
+    instructions = tts_instructions(cfg["character"], cfg["style"])
+    voice = cfg["voice"] if cfg["voice"] in VOICES else PROMPTER_VOICE
+    ev, ep, er = cfg["edge_voice"], cfg["edge_pitch"], cfg["edge_rate"]
+    openai = (_cached(TTS_CACHE / f"oa_{h(voice, 'gpt-4o-mini-tts', 'mp3', instructions)}.mp3",
+                      lambda: _generate_openai(text, voice, instructions)), "openai", voice)
+    edge = (_cached(TTS_CACHE / f"ed_{h(ev, ep, er)}.mp3", lambda: edge_voices.synth(text, ev, ep, er)), "edge", f"{ev} {ep:+d}Hz {er:+d}%")
+    chain = [openai] if cfg["tts"] == "openai" else [edge, openai]
+    if cfg["tts"] == "elevenlabs" and vid and eleven.can("tts"):
+        chain.insert(0, (_cached(TTS_CACHE / f"el_{h('el', vid, eleven.TTS_MODEL)}.mp3", lambda: eleven.synth(text, vid)), "elevenlabs", vid))
+    reason = ""
+    for i, (run, provider, label) in enumerate(chain):
+        if provider == "openai" and i:
+            log.warning("TTS FALLBACK OpenAI (%s) voz=%s texto=%r", reason, voice, text[:60])
+            TTS_STATS["openai_fallback"] += 1
+            TTS_STATS["fallback_reasons"] = (TTS_STATS["fallback_reasons"] + [reason])[-20:]
+        try:
+            if provider == "openai":
+                async with TTS_SEM:
+                    audio = await run()
+            else:
+                audio = await run()
+            if provider != "openai":
+                TTS_STATS[provider] += 1
+            return audio, provider, label
+        except Exception as e:
+            reason = f"{provider}: {str(e)[:160]}"
+            log.warning("TTS %s falhou: %s", provider, reason)
+    raise HTTPException(502, "Não consegui gerar a voz.")
+
+
+async def synth(text: str, cfg: dict) -> tuple:
     text = clean_for_tts(text)
     if not text:
         raise HTTPException(400, "Texto vazio")
-    voice = voice if voice in VOICES else PROMPTER_VOICE
-    el_voice_id = None if el_voice_id in PREMADE_IDS else el_voice_id
-    vid = el_voice_id or (prompter_voice_id() if character is None else None)
-    instructions = tts_instructions(character, style)
-    el_key = hashlib.sha256(f"{text}|el|{vid}|{eleven.TTS_MODEL}".encode()).hexdigest()
-    oa_key = hashlib.sha256(f"{text}|{voice}|gpt-4o-mini-tts|mp3|{instructions}".encode()).hexdigest()
-    el_path, oa_path = TTS_CACHE / f"el_{el_key}.mp3", TTS_CACHE / f"oa_{oa_key}.mp3"
-    use_el = bool(vid) and eleven.can("tts")
-    if use_el and el_path.exists():
-        return el_path.read_bytes(), "elevenlabs", vid
-    if not use_el and oa_path.exists():
-        return oa_path.read_bytes(), "openai", voice
-    key = el_key if use_el else oa_key
+    key = hashlib.sha256(json.dumps([text, cfg], sort_keys=True).encode()).hexdigest()
     if key not in TTS_INFLIGHT:
         async def job():
             try:
-                reason = _fallback_reason(vid)
-                if use_el:
-                    for attempt in range(2):
-                        try:
-                            audio = await eleven.synth(text, vid)
-                            el_path.write_bytes(audio)
-                            eleven.STATS["elevenlabs"] += 1
-                            return audio, "elevenlabs", vid
-                        except Exception as e:
-                            reason = str(e)[:200]
-                            log.warning("ElevenLabs TTS tentativa %s falhou: %s", attempt + 1, reason)
-                            if isinstance(e, eleven.ElevenError) and e.status < 500:
-                                break
-                log.warning("TTS FALLBACK OpenAI (%s) voz=%s texto=%r", reason, voice, text[:60])
-                eleven.STATS["openai_fallback"] += 1
-                eleven.STATS["fallback_reasons"] = (eleven.STATS["fallback_reasons"] + [reason])[-20:]
-                if oa_path.exists():
-                    return oa_path.read_bytes(), "openai", voice
-                async with TTS_SEM:
-                    audio = await _generate_openai(text, voice, instructions)
-                oa_path.write_bytes(audio)
-                return audio, "openai", voice
+                return await _synth_job(text, cfg)
             finally:
                 TTS_INFLIGHT.pop(key, None)
         TTS_INFLIGHT[key] = asyncio.ensure_future(job())
@@ -677,14 +730,13 @@ async def prepare_audio(script: Script, character: str, start_idx: int):
     order = script.lines[start_idx:] + script.lines[:start_idx]
     ai = [ln for ln in order if ln.kind == "dialogue" and ln.character != character and ln.character in voices]
     t0 = time.perf_counter()
-    res = await asyncio.gather(*[synth(effective_text(script, ln), voices[ln.character].voice, ln.character,
-                                       voices[ln.character].style, voices[ln.character].el_voice_id) for ln in ai],
-                               return_exceptions=True)
+    res = await asyncio.gather(*[synth(effective_text(script, ln), tts_cfg(voices[ln.character])) for ln in ai], return_exceptions=True)
     hints = {hint_text(effective_text(script, ln)) for ln in order if ln.kind == "dialogue" and ln.character == character}
-    await asyncio.gather(*[synth(h, PROMPTER_VOICE) for h in hints if h], return_exceptions=True)
+    await asyncio.gather(*[synth(h, tts_cfg(None)) for h in hints if h], return_exceptions=True)
     fails = [r for r in res if isinstance(r, Exception)]
-    log.info("pré-geração: %s falas IA (%s falhas, %s ElevenLabs) + %s dicas em %.1fs", len(ai), len(fails),
-             sum(1 for r in res if isinstance(r, tuple) and r[1] == "elevenlabs"), len(hints), time.perf_counter() - t0)
+    providers = [r[1] for r in res if isinstance(r, tuple)]
+    log.info("pré-geração: %s falas IA (%s falhas, %s Edge, %s OpenAI) + %s dicas em %.1fs", len(ai), len(fails),
+             providers.count("edge"), providers.count("openai"), len(hints), time.perf_counter() - t0)
 
 
 def guess_female(name: str) -> bool:
@@ -692,80 +744,87 @@ def guess_female(name: str) -> bool:
     return first.endswith("a") or first in {"inês", "isabel", "raquel", "beatriz", "mãe", "avó", "rainha", "senhora", "dona", "mulher"}
 
 
-def assign_default_eleven(script: Script) -> bool:
-    pool = CATALOG["voices"]
-    if not pool:
-        return False
-    fem = [v for v in pool if v["gender"] == "female"]
-    mal = [v for v in pool if v["gender"] != "female"]
-    used, changed = {c.el_voice_id for c in script.characters if c.el_voice_id and c.el_voice_id not in PREMADE_IDS}, False
+def assign_edge(script: Script, force: bool = False) -> bool:
+    """Gives each character a distinct Edge pt-PT voice + pitch/rate combination."""
+    used, changed = set(), False
+    if not force:
+        used = {(c.edge_voice, c.edge_pitch, c.edge_rate) for c in script.characters if c.edge_voice in edge_voices.ids()}
     for c in script.characters:
-        if c.el_voice_id and c.el_voice_id not in PREMADE_IDS:
+        if not force and c.edge_voice in edge_voices.ids():
             continue
-        group = (fem if guess_female(c.name) else mal) or pool
-        other = mal if group is fem else fem
-        v = next((x for x in group + other if x["id"] not in used), group[len(used) % len(group)])
-        c.el_voice_id, c.el_voice_name = v["id"], v["name"]
-        used.add(v["id"])
+        pool = edge_voices.combos("female" if guess_female(c.name) else "male")
+        c.edge_voice, c.edge_pitch, c.edge_rate = next((x for x in pool if x not in used), pool[len(used) % len(pool)])
+        used.add((c.edge_voice, c.edge_pitch, c.edge_rate))
         changed = True
     return changed
 
 
-async def eleven_bootstrap(rebuild: bool = False):
-    doc = await db.voice_catalog.find_one({"_id": "pt-PT"})
-    if doc and doc.get("voices"):
-        CATALOG.update(voices=doc["voices"], prompter=doc.get("prompter"), source=doc.get("source", "api"))
-    st = await eleven.check_status(force=True)
-    seeded = CATALOG.get("source") == "seed"
-    if (rebuild or not CATALOG["voices"] or seeded) and (st["perms"].get("shared_voices") or (not CATALOG["voices"] and st["perms"].get("tts"))):
-        try:
-            cat = await eleven.build_catalog() if st["perms"].get("shared_voices") else eleven.seed_catalog()
-            if cat["voices"] and not (seeded and cat["source"] == "seed"):
-                CATALOG.update(voices=cat["voices"], prompter=cat["prompter"], source=cat["source"])
-                await db.voice_catalog.update_one({"_id": "pt-PT"}, {"$set": {**cat, "updated_at": now()}}, upsert=True)
-        except Exception as e:
-            log.exception("catálogo pt-PT falhou: %s", e)
+async def voices_bootstrap():
+    await edge_voices.refresh_voices()
     n = 0
     async for d in db.scripts.find({}):
         s = Script.from_mongo(d)
-        if assign_default_eleven(s):
+        legacy = any("tts" not in c for c in d.get("characters", []))
+        if assign_edge(s) or legacy:
             await save_characters(s)
             n += 1
-    log.info("vozes: catálogo=%s, textos migrados=%s, avisos=%s", len(CATALOG["voices"]), n, eleven.messages())
+    log.info("vozes Edge: %s, textos migrados=%s", [v["id"] for v in edge_voices.VOICES], n)
+    doc = await db.voice_catalog.find_one({"_id": "pt-PT"})
+    if doc and doc.get("voices"):
+        CATALOG.update(voices=doc["voices"], prompter=doc.get("prompter"), source=doc.get("source", "api"))
+    elif eleven.KEY:
+        cat = eleven.seed_catalog()
+        CATALOG.update(voices=cat["voices"], prompter=cat["prompter"], source=cat["source"])
 
 
 def voices_info() -> dict:
-    return {"provider": "elevenlabs" if CATALOG["voices"] and eleven.can("tts") else "openai", "openai": VOICES,
-            "elevenlabs": CATALOG["voices"], "prompter": CATALOG["prompter"], "pt_native": bool(CATALOG["voices"]),
-            "model": eleven.TTS_MODEL, "messages": eleven.messages()}
+    return {"provider": "edge", "edge": edge_voices.VOICES, "prompter": edge_voices.PROMPTER, "openai": VOICES,
+            "elevenlabs": CATALOG["voices"] if eleven.KEY else [], "eleven_configured": bool(eleven.KEY),
+            "pt_native": True, "messages": []}
 
 
 @api.get("/voices")
 async def list_voices():
-    await eleven.check_status()
     return voices_info()
+
+
+@api.get("/tts/status")
+async def tts_status():
+    return {"default": "edge", "edge_voices": edge_voices.VOICES, "prompter": edge_voices.PROMPTER, "stats": TTS_STATS}
 
 
 @api.get("/eleven/status")
 async def eleven_status(refresh: bool = False):
-    if refresh:
-        await eleven_bootstrap(rebuild=not CATALOG["voices"])
-    st = await eleven.check_status()
+    st = await eleven.check_status(force=refresh)
     return {"configured": bool(eleven.KEY), "valid": st["valid"], "permissions": st["perms"], "errors": st["errors"],
             "messages": eleven.messages(), "tts_model": eleven.TTS_MODEL, "realtime_model": eleven.REALTIME_MODEL,
             "catalog": CATALOG["voices"], "prompter": CATALOG["prompter"], "stats": eleven.STATS}
 
 
+@api.get("/stt/engines")
+async def stt_engines():
+    return {"order": ["deepgram", "gemini", "webspeech"], "deepgram": bool(speech.DEEPGRAM_KEY), "gemini": bool(speech.GEMINI_KEY),
+            "deepgram_model": speech.DEEPGRAM_MODEL, "gemini_model": speech.GEMINI_LIVE_MODEL, "messages": speech.messages()}
+
+
+@api.post("/stt/deepgram-token")
+async def stt_deepgram_token():
+    return await speech.deepgram_token()
+
+
+@api.post("/stt/gemini-token")
+async def stt_gemini_token():
+    return await speech.gemini_token()
+
+
 @api.post("/stt/token")
 async def stt_token():
     if not eleven.KEY:
-        raise HTTPException(503, eleven.messages()[0])
+        raise HTTPException(503, "Falta a chave ElevenLabs no ficheiro backend/.env")
     try:
         token = await eleven.realtime_token()
     except eleven.ElevenError as e:
         log.warning("token Scribe falhou: %s", e)
-        if e.is_auth:
-            eleven.STATUS["perms"]["realtime_token"] = False
         raise HTTPException(503, eleven.perm_message("realtime_token"))
     return {"token": token, "url": eleven.REALTIME_URL, "model_id": eleven.REALTIME_MODEL, "language_code": "pt", "sample_rate": 16000}
 
@@ -778,30 +837,35 @@ class ElevenVoiceIn(BaseModel):
 @api.post("/scripts/{script_id}/eleven-voice")
 async def set_eleven_voice(script_id: str, body: ElevenVoiceIn):
     if not eleven.KEY:
-        raise HTTPException(400, "ElevenLabs não está configurado.")
+        raise HTTPException(400, "Falta a chave ElevenLabs no ficheiro backend/.env")
     script = await get_script(script_id)
     for c in script.characters:
         if c.name == body.character:
             c.el_voice_id, c.el_voice_name = body.voice.get("id") or None, body.voice.get("name", "")
+            c.tts = "elevenlabs" if c.el_voice_id else "edge"
     await save_characters(script)
     return script_out(script)
 
 
 @api.post("/scripts/{script_id}/auto-voices")
-async def auto_eleven_voices(script_id: str):
-    if not CATALOG["voices"]:
-        raise HTTPException(404, (eleven.messages() or ["Sem vozes PT-PT disponíveis."])[0])
+async def auto_voices(script_id: str):
     script = await get_script(script_id)
+    assign_edge(script, force=True)
     for c in script.characters:
-        c.el_voice_id = None
-    assign_default_eleven(script)
+        c.tts = "edge"
     await save_characters(script)
     return script_out(script)
 
 
 @api.post("/tts")
 async def tts(body: TTSIn):
-    audio, provider, voice = await synth(body.text, body.voice, body.character, body.style, body.el_voice_id)
+    if body.character:
+        cfg = {"character": body.character, "voice": body.voice, "style": body.style, "tts": body.tts or "edge",
+               "el_voice_id": body.el_voice_id, "edge_voice": body.edge_voice if body.edge_voice in edge_voices.ids() else edge_voices.VOICES[0]["id"],
+               "edge_pitch": max(-50, min(50, body.edge_pitch)), "edge_rate": max(-50, min(50, body.edge_rate))}
+    else:
+        cfg = tts_cfg(None)
+    audio, provider, voice = await synth(body.text, cfg)
     return Response(content=audio, media_type="audio/mpeg", headers={
         "Cache-Control": "public, max-age=86400", "X-TTS-Provider": provider, "X-TTS-Voice": voice or ""})
 
@@ -852,92 +916,13 @@ async def stt(file: UploadFile = File(...)):
     return {"text": await transcribe(data, (file.filename or "a.webm").rsplit(".", 1)[-1].lower())}
 
 
-# ---------- Local fast matching ----------
-NUMS = {"0": "zero", "1": "um", "2": "dois", "3": "tres", "4": "quatro", "5": "cinco", "6": "seis", "7": "sete",
-        "8": "oito", "9": "nove", "10": "dez", "11": "onze", "12": "doze", "15": "quinze", "20": "vinte",
-        "30": "trinta", "100": "cem"}
-COLLOQUIAL = [
-    (r"\bpara (a|à)\b", "pra"), (r"\bpara o\b", "pro"), (r"\b(para|pa|pra)\b", "pra"),
-    (r"\bestas\b", "tas"), (r"\besta\b", "ta"), (r"\bestou\b", "tou"), (r"\bestava\b", "tava"),
-    (r"\bestavas\b", "tavas"), (r"\bestamos\b", "tamos"), (r"\bestao\b", "tao"),
-    (r"\bnao e\b", "ne"), (r"\bcom o\b", "co"), (r"\bcom a\b", "ca"), (r"\bde um\b", "dum"), (r"\bde uma\b", "duma"),
-    (r"\bem um\b", "num"), (r"\bem uma\b", "numa"), (r"\bpois e\b", "poise"),
-]
-FILLERS = {"hum", "hmm", "eh", "ah", "ahn", "uh", "um hum", "pronto"}
-
-
-def norm_tokens(text: str) -> List[str]:
-    t = re.sub(r"\([^)]*\)", " ", text.lower())
-    t = unicodedata.normalize("NFKD", t)
-    t = "".join(c for c in t if not unicodedata.combining(c))
-    t = re.sub(r"[-'’`´]", " ", t)
-    t = re.sub(r"[^\w\s]", " ", t)
-    t = " ".join(NUMS.get(w, w) for w in t.split())
-    for pat, rep in COLLOQUIAL:
-        t = re.sub(pat, rep, t)
-    return [w for w in t.split() if w not in FILLERS]
-
-
-def local_match(expected: str, said: str, fuzzy_ratio: float = 0.75) -> dict:
-    exp, got = norm_tokens(expected), norm_tokens(said)
-    if not exp:
-        return {"accuracy": 100.0, "max_gap": 0, "extra": 0, "differences": []}
-    sm = difflib.SequenceMatcher(a=exp, b=got, autojunk=False)
-    matched, extra, max_gap, diffs = 0, 0, 0, []
-    for op, i1, i2, j1, j2 in sm.get_opcodes():
-        a, b = exp[i1:i2], got[j1:j2]
-        if op == "equal":
-            matched += len(a)
-            continue
-        if op == "replace":
-            fuzzy = sum(1 for x, y in zip(a, b) if difflib.SequenceMatcher(a=x, b=y).ratio() >= fuzzy_ratio)
-            matched += fuzzy
-            if fuzzy == len(a) == len(b):
-                continue
-            max_gap = max(max_gap, len(a) - fuzzy)
-            extra += max(0, len(b) - len(a))
-            diffs.append({"expected": " ".join(a), "said": " ".join(b), "type": "troca"})
-        elif op == "delete":
-            max_gap = max(max_gap, len(a))
-            diffs.append({"expected": " ".join(a), "said": "", "type": "omissão" if len(a) < 5 else "salto"})
-        elif op == "insert":
-            extra += len(b)
-            diffs.append({"expected": "", "said": " ".join(b), "type": "acrescento"})
-    return {"accuracy": round(100 * matched / len(exp), 1), "max_gap": max_gap, "extra": extra, "differences": diffs}
-
-
-NEGATIONS = {"nao", "ne", "nunca", "nada", "nem", "ninguem", "jamais", "sim"}
-NEEDS_AI = re.compile(r"\b(texto|linha|deixa|mudamos|mudaram|agora digo|passei a dizer|em vez de|cortamos|nao me lembro|como e que e)\b")
-
-
-def fast_verdict(strictness: str, m: dict, n_words: int, said: str = ""):
-    """Devolve (aceita_já, severidade) ou None para pedir à IA."""
-    acc, gap, extra = m["accuracy"], m["max_gap"], m["extra"]
-    if acc < 97 and NEEDS_AI.search(" ".join(norm_tokens(said))):
-        return None
-    if strictness == "nunca":
-        return (True, ("none" if acc >= 97 else "minor")) if acc >= 50 else None
-    if any(w in NEGATIONS for d in m["differences"] for w in f"{d['expected']} {d['said']}".split()):
-        return None
-    if strictness == "rigor":
-        if acc >= 97 and extra <= 1:
-            return True, "none"
-        return None
-    short = n_words <= 3
-    if acc >= 97 and extra <= 2:
-        return True, "none"
-    if (acc >= (50 if short else 72)) and gap < 5 and extra < max(4, n_words // 2):
-        return True, "minor"
-    return None
-
-
 # ---------- Sessions ----------
 @api.post("/sessions")
 async def create_session(body: SessionIn):
     script = await get_script(body.script_id)
     if body.character not in [c.name for c in script.characters]:
         raise HTTPException(400, "Personagem inválida")
-    if assign_default_eleven(script):
+    if assign_edge(script):
         await save_characters(script)
     s = Session(**body.model_dump())
     res = await db.sessions.insert_one(s.to_mongo())
@@ -968,30 +953,102 @@ Responde APENAS JSON compacto:
 {"kind":"line|note|help|other","accuracy":0-100,"severity":"none|minor|major","interrupt":true|false,"feedback":"uma frase curta falada em PT-PT (se interromperes: o que falhou e o trecho correcto; se note: confirma; se help: as primeiras palavras da fala); vazio se seguir","differences":[{"expected":"","said":"","type":"omissão|troca|acrescento|repetição|salto|inversão"}],"memory_note":"para note: a nota autónoma citando a fala; senão vazio"}"""
 
 
-async def evaluate_turn(session: Session, script: Script, line_idx: int, said: str, mode: str) -> dict:
+CONFIRM_SYSTEM = """Revês as diferenças detectadas num ensaio de teatro (PT-PT) entre a fala esperada e o que o reconhecimento automático de voz ouviu.
+O reconhecimento de voz distorce muitas vezes palavras certas: homófonos ou quase-homófonos (à/há, e/é, ou/o), palavras juntas ou separadas (deixei-o / deixeio), pronomes átonos e partículas engolidos (-o, -me, -se, me, o, a, de), contracções e formas coloquiais (tás/estás, pra/para), terminações verbais parecidas, pontuação, números.
+O actor está a dizer um texto que conhece: parte do princípio de que disse bem. Uma palavra curta em falta ou trocada por uma partícula (e, a, o, é, há), ou uma transcrição que deixa a frase agramatical ou sem sentido, é quase sempre erro de reconhecimento, não do actor.
+EXCEPÇÃO: negações e afirmações (não, nunca, nem, nada, ninguém, jamais, sim) acrescentadas, omitidas ou trocadas invertem o sentido — são sempre REAIS.
+Só é REAL quando a transcrição mostra claramente outras palavras com sentido próprio (ex.: "nunca" → "sempre", "casa" → "rua"), uma negação mudada, uma frase/trecho inteiro em falta, ou palavras acrescentadas com sentido.
+Para cada diferença numerada decide se é REAL (o actor mudou, omitiu ou acrescentou palavras de forma que altera o texto ou o sentido) ou se é provavelmente um erro de reconhecimento / variação de pronúncia. Em caso de dúvida, NÃO é real.
+Se o modo for "escrito" não há reconhecimento de voz: só ignora gralhas evidentes.
+Responde APENAS JSON: {"real":[índices das diferenças reais], "notes":{"índice":"comentário curto em PT-PT"}}"""
+CONFIRM_TASKS: dict = {}
+
+
+def strong_difference(d: dict) -> bool:
+    words = f"{d.get('expected', '')} {d.get('said', '')}".split()
+    return len(d.get("expected", "").split()) >= 3 or len(d.get("said", "").split()) >= 3 or any(w in NEGATIONS for w in words)
+
+
+async def confirm_differences(expected: str, said: str, diffs: List[dict], mode: str) -> tuple:
+    listing = "\n".join(f"{i}. esperado: \"{d.get('expected', '')}\" → ouvido: \"{d.get('said', '')}\" ({d.get('type', '')})" for i, d in enumerate(diffs))
+    prompt = f"Modo: {mode}\nFala esperada: {expected}\nTranscrição: {said}\nDiferenças:\n{listing}"
+    try:
+        r = parse_json(await ask_llm(CONFIRM_SYSTEM, prompt, FAST_MODEL))
+        real = {int(i) for i in r.get("real", []) if str(i).lstrip("-").isdigit()}
+        return real, {int(k): v for k, v in (r.get("notes") or {}).items() if str(k).isdigit()}
+    except Exception as e:
+        log.warning("confirmação de diferenças falhou (%s); a usar regra conservadora", e)
+        return {i for i, d in enumerate(diffs) if strong_difference(d)}, {}
+
+
+async def confirm_turn(session_id: str, turn: Turn):
+    real, notes = await confirm_differences(turn.expected, turn.said, turn.differences, turn.mode)
+    real |= {i for i, d in enumerate(turn.differences)
+             if any(w in NEGATIONS for w in f"{d.get('expected', '')} {d.get('said', '')}".split())}
+    for i, d in enumerate(turn.differences):
+        d["status"] = "real" if i in real else "discarded"
+        if notes.get(i):
+            d["note"] = notes[i]
+    acc = final_accuracy(len(norm_tokens(turn.expected)), [d for d in turn.differences if d["status"] == "real"])
+    await db.sessions.update_one({"_id": oid(session_id)}, {"$set": {
+        "turns.$[t].differences": turn.differences, "turns.$[t].review": "done", "turns.$[t].final_accuracy": acc}},
+        array_filters=[{"t.id": turn.id}])
+    log.info("confirmação: %s/%s diferenças reais (fala %s)", len(real), len(turn.differences), turn.line_idx)
+
+
+def schedule_confirm(session_id: str, turn: Turn):
+    task = asyncio.create_task(confirm_turn(session_id, turn))
+    tasks = CONFIRM_TASKS.setdefault(session_id, set())
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+def block_lines(script: Script, line_idx: int, line_idxs: List[int]) -> List[Line]:
+    idxs = line_idxs or [line_idx]
+    if line_idx != min(idxs) or any(i < 0 or i >= len(script.lines) for i in idxs):
+        raise HTTPException(400, "Fala inválida")
+    out = [script.lines[i] for i in sorted(set(idxs))]
+    if any(ln.kind != "dialogue" or ln.character != out[0].character for ln in out):
+        raise HTTPException(400, "Bloco inválido")
+    return out
+
+
+def attribute_lines(script: Script, block: List[Line], diffs: List[dict]):
+    bounds, acc = [], 0
+    for ln in block:
+        acc += len(norm_tokens(effective_text(script, ln)))
+        bounds.append((acc, ln.idx))
+    for d in diffs:
+        d["line_idx"] = next((idx for end, idx in bounds if d.get("pos", 0) < end), block[-1].idx)
+
+
+async def evaluate_turn(session: Session, script: Script, line_idx: int, said: str, mode: str, line_idxs: List[int] = ()) -> dict:
     if line_idx < 0 or line_idx >= len(script.lines):
         raise HTTPException(400, "Fala inválida")
-    line = script.lines[line_idx]
-    expected = effective_text(script, line)
+    block = block_lines(script, line_idx, list(line_idxs))
+    line = block[0]
+    expected = " ".join(effective_text(script, ln) for ln in block)
     m = local_match(expected, said, 0.9 if session.strictness == "rigor" else 0.75)
+    attribute_lines(script, block, m["differences"])
     exp_tokens = norm_tokens(expected)
     notes = [" ".join(norm_tokens(n.text)) for n in script.memory if not n.new_text]
     in_memory = any(" ".join(exp_tokens[i:i + 4]) in n for n in notes for i in range(max(1, len(exp_tokens) - 3)))
     verdict = None if in_memory else fast_verdict(session.strictness, m, len(exp_tokens), said)
     note = None
+    base = {"line_idx": line.idx, "line_idxs": [ln.idx for ln in block], "expected": expected, "said": said, "mode": mode}
     if verdict:
         _, severity = verdict
-        turn = Turn(line_idx=line_idx, expected=expected, said=said, mode=mode, kind="line",
-                    accuracy=m["accuracy"], severity=severity, differences=m["differences"])
+        turn = Turn(**base, kind="line", accuracy=m["accuracy"], severity=severity, differences=m["differences"])
     else:
-        prev = next((ln for ln in reversed(script.lines[:line_idx]) if ln.kind == "dialogue"), None)
+        prev = next((ln for ln in reversed(script.lines[:line.idx]) if ln.kind == "dialogue"), None)
         prompt = (
             f"Instruções do actor: {session.instructions or '(nenhuma)'}\n"
             f"Memória do texto:\n{memory_block(script)}\n"
             f"Deixa anterior ({prev.character if prev else '-'}): {effective_text(script, prev) if prev else '-'}\n"
             f"Fala esperada ({line.character}): {expected}\n"
             f"O actor disse ({mode}): {said}\n"
-            f"Diferenças automáticas (precisão {m['accuracy']}%): {json.dumps(m['differences'], ensure_ascii=False)}"
+            f"Diferenças automáticas, já sem as que soam igual (precisão {m['accuracy']}%): "
+            f"{json.dumps([{k: d[k] for k in ('expected', 'said', 'type')} for d in m['differences']], ensure_ascii=False)}"
         )
         try:
             r = parse_json(await ask_llm(TURN_SYSTEM, prompt, FAST_MODEL))
@@ -1000,19 +1057,27 @@ async def evaluate_turn(session: Session, script: Script, line_idx: int, said: s
             r = {"kind": "line", "accuracy": m["accuracy"], "severity": "major", "interrupt": False}
         kind = r.get("kind", "line")
         turn = Turn(
-            line_idx=line_idx, expected=expected, said=said, mode=mode, kind=kind,
+            **base, kind=kind,
             accuracy=r.get("accuracy", m["accuracy"]) if kind == "line" else None, severity=r.get("severity", "none"),
             interrupted=bool(r.get("interrupt")) and kind == "line" and session.strictness != "nunca",
             feedback=r.get("feedback", "") or "",
-            differences=r.get("differences", []) if kind == "line" else [],
+            differences=m["differences"] if kind == "line" else [],
         )
         if kind == "note" and r.get("memory_note"):
             note = MemoryNote(text=r["memory_note"])
             await db.scripts.update_one({"_id": oid(script.id)}, {"$push": {"memory": note.model_dump()}})
-            asyncio.create_task(link_note_bg(script, note, line_idx))
+            asyncio.create_task(link_note_bg(script, note, line.idx))
             if not turn.feedback:
                 turn.feedback = "Anotado. Vou ter isso em conta."
+    if turn.differences:
+        turn.review = "pending"
+        for d in turn.differences:
+            d["status"] = "pending"
+    elif turn.kind == "line":
+        turn.final_accuracy = 100.0
     await db.sessions.update_one({"_id": oid(session.id)}, {"$push": {"turns": turn.model_dump()}})
+    if turn.differences:
+        schedule_confirm(session.id, turn)
     return {
         "turn": turn.model_dump(),
         "advance": turn.kind == "line" and not turn.interrupted,
@@ -1024,7 +1089,7 @@ async def evaluate_turn(session: Session, script: Script, line_idx: int, said: s
 async def session_turn(session_id: str, body: TurnIn):
     session = await get_session(session_id)
     script = await get_script(session.script_id)
-    return await evaluate_turn(session, script, body.line_idx, body.said, body.mode)
+    return await evaluate_turn(session, script, body.line_idx, body.said, body.mode, body.line_idxs)
 
 
 @api.post("/sessions/{session_id}/voice-turn")
@@ -1041,13 +1106,28 @@ async def session_voice_turn(session_id: str, line_idx: int = Form(...), file: U
     return {"said": said, **res}
 
 
+def real_differences(t: Turn) -> List[dict]:
+    return [d for d in t.differences if d.get("status", "real") == "real"]
+
+
+async def settle_confirmations(session: Session) -> Session:
+    pending = CONFIRM_TASKS.get(session.id)
+    if pending:
+        await asyncio.wait(list(pending), timeout=30)
+    session = await get_session(session.id)
+    left = [t for t in session.turns if t.review == "pending"]
+    if left:
+        await asyncio.gather(*[confirm_turn(session.id, t) for t in left], return_exceptions=True)
+        session = await get_session(session.id)
+    return session
+
+
 SUMMARY_SYSTEM = """És um treinador de texto experiente para actores. Falas português de Portugal (PT-PT).
-Recebes as falas que o actor ensaiou (texto esperado vs. o que disse, em cada tentativa), as instruções e a memória do texto (alterações acordadas que substituem o original).
-Faz um resumo detalhado da prestação. É OBRIGATÓRIO listar TUDO o que foi diferente do texto fornecido (cada omissão, troca, acrescento, repetição, salto), mesmo pequenas coisas, ignorando apenas pontuação, erros evidentes de transcrição automática e formas coloquiais/contraídas equivalentes (prá/para, tá/está, tou/estou, etc.), que a transcrição normaliza e NÃO são erros.
-Sugere zonas a rever e dá técnicas de memorização concretas e adaptadas aos erros observados (ex.: ligar a fala à deixa, imagens mentais, palavras-âncora, ritmo).
+Recebes as falas que o actor ensaiou (texto esperado e, para cada tentativa, as diferenças REAIS já confirmadas — os erros de reconhecimento de voz já foram descartados), as instruções e a memória do texto.
+Não inventes nem acrescentes diferenças: usa apenas as que recebes. Se não houver diferenças, diz que o texto foi dito tal e qual.
+Sugere zonas a rever (só falas com diferenças reais) e dá técnicas de memorização concretas e adaptadas aos erros observados (ex.: ligar a fala à deixa, imagens mentais, palavras-âncora, ritmo).
 Responde APENAS com JSON:
-{"score":0-100,"overview":"parágrafo de síntese","strengths":["..."],
- "differences":[{"line_idx":n,"expected":"trecho","said":"trecho","type":"omissão|troca|acrescento|repetição|salto|inversão","note":"comentário curto"}],
+{"overview":"parágrafo de síntese","strengths":["..."],
  "zones_to_review":[{"line_idx":n,"reason":"..."}],
  "memorization_tips":["..."],
  "next_steps":"o que fazer no próximo ensaio"}"""
@@ -1058,22 +1138,28 @@ async def finish_session(session_id: str):
     session = await get_session(session_id)
     if session.status == "finished" and session.summary:
         return session.model_dump()
+    session = await settle_confirmations(session)
     script = await get_script(session.script_id)
     line_turns = [t for t in session.turns if t.kind == "line"]
-    attempted = sorted({t.line_idx for t in line_turns})
+    attempted = sorted({i for t in line_turns for i in (t.line_idxs or [t.line_idx])})
+    accs = [t.final_accuracy if t.final_accuracy is not None else (t.accuracy or 0) for t in line_turns]
+    differences = [{"line_idx": d.get("line_idx", t.line_idx), "expected": d.get("expected", ""), "said": d.get("said", ""),
+                    "type": d.get("type", "troca"), "note": d.get("note", "")} for t in line_turns for d in real_differences(t)]
     stats = {
         "lines_attempted": len(attempted),
         "attempts": len(line_turns),
         "interruptions": sum(1 for t in line_turns if t.interrupted),
-        "avg_accuracy": round(sum(t.accuracy or 0 for t in line_turns) / len(line_turns), 1) if line_turns else None,
+        "avg_accuracy": round(sum(accs) / len(accs), 1) if accs else None,
+        "discarded": sum(1 for t in line_turns for d in t.differences if d.get("status") == "discarded"),
     }
     if not line_turns:
         summary = {"score": None, "overview": "Não houve falas ditas neste ensaio.", "strengths": [], "differences": [],
                    "zones_to_review": [], "memorization_tips": [], "next_steps": ""}
     else:
         detail = "\n\n".join(
-            f"[fala {t.line_idx}] ESPERADO: {t.expected}\nDISSE ({t.mode}): {t.said}\n"
-            f"avaliação imediata: precisão {t.accuracy}, {'interrompido' if t.interrupted else 'seguiu'}"
+            f"[fala {t.line_idx}] ESPERADO: {t.expected}\nDIFERENÇAS REAIS: "
+            f"{json.dumps([{k: d.get(k, '') for k in ('expected', 'said', 'type')} for d in real_differences(t)], ensure_ascii=False) if real_differences(t) else 'nenhuma'}"
+            f"\n{'interrompido' if t.interrupted else 'seguiu'}"
             for t in line_turns
         )
         prompt = (f"Texto: {script.title}\nPersonagem: {session.character}\nInstruções: {session.instructions or '(nenhuma)'}\n"
@@ -1083,6 +1169,8 @@ async def finish_session(session_id: str):
         except Exception as e:
             log.exception("resumo falhou: %s", e)
             raise HTTPException(502, "Não consegui gerar o resumo. Tenta outra vez.")
+        summary["score"] = stats["avg_accuracy"]
+        summary["differences"] = differences
     summary["stats"] = stats
     fin = now()
     await db.sessions.update_one({"_id": oid(session_id)}, {"$set": {"status": "finished", "summary": summary, "finished_at": fin}})
@@ -1122,7 +1210,7 @@ async def seed():
         lines, chars = await build_structure(DEMO_TEXT)
         s = Script(title="A Espera", author="Cena de demonstração", raw_text=DEMO_TEXT, lines=lines, characters=chars)
         await db.scripts.insert_one(s.to_mongo())
-    asyncio.create_task(eleven_bootstrap())
+    asyncio.create_task(voices_bootstrap())
 
 
 app.include_router(api)

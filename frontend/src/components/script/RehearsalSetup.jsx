@@ -17,6 +17,7 @@ const PRESETS = [
 
 export const prefsKey = (id) => `ensaio-prefs-${id}`;
 export const loadPrefs = (id) => JSON.parse(localStorage.getItem(prefsKey(id)) || "{}");
+export const savePrefs = (id, patch) => localStorage.setItem(prefsKey(id), JSON.stringify({ ...loadPrefs(id), ...patch }));
 
 export const RehearsalSetup = ({ script, startIdx, onStartIdx }) => {
   const nav = useNavigate();
@@ -25,6 +26,7 @@ export const RehearsalSetup = ({ script, startIdx, onStartIdx }) => {
   const [instructions, setInstructions] = useState(saved.instructions ?? PRESETS[0].text);
   const [hideText, setHideText] = useState(saved.hideText ?? true);
   const [hintSeconds, setHintSeconds] = useState(saved.hintSeconds ?? 5);
+  const [skipMode, setSkipMode] = useState(!!saved.skipMode);
   const [busy, setBusy] = useState(false);
 
   const start = async () => {
@@ -32,7 +34,7 @@ export const RehearsalSetup = ({ script, startIdx, onStartIdx }) => {
     const hs = Number(hintSeconds);
     if (!Number.isInteger(hs) || hs < 3 || hs > 15) return toast.error("O tempo até à dica tem de ser entre 3 e 15 segundos.");
     setBusy(true);
-    localStorage.setItem(prefsKey(script.id), JSON.stringify({ character, instructions, hideText, hintSeconds: hs }));
+    localStorage.setItem(prefsKey(script.id), JSON.stringify({ character, instructions, hideText, hintSeconds: hs, skipMode }));
     try {
       const strictness = PRESETS.find((p) => p.text === instructions)?.id || "grave";
       const s = await api.createSession({ script_id: script.id, character, instructions, strictness, start_idx: startIdx, hint_seconds: hs });
@@ -71,6 +73,12 @@ export const RehearsalSetup = ({ script, startIdx, onStartIdx }) => {
       <div className="flex items-center justify-between">
         <label htmlFor="hide" className="text-sm text-stone-300">Esconder o meu texto</label>
         <Switch id="hide" data-testid="hide-text-switch" checked={hideText} onCheckedChange={setHideText} />
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <label htmlFor="skip" className="text-sm text-stone-300">
+          Modo Saltar <span className="block text-stone-500 text-xs">Só a deixa antes de cada fala tua (tecla S no ensaio)</span>
+        </label>
+        <Switch id="skip" data-testid="skip-mode-switch" checked={skipMode} onCheckedChange={setSkipMode} />
       </div>
       <div className="flex items-center justify-between gap-4">
         <label htmlFor="hint-seconds" className="text-sm text-stone-300">

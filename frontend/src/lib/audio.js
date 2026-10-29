@@ -18,3 +18,5 @@ export function playUrl(url, onStart) {
     player.play().catch(() => resolve(false));
   });
 }
+
+export const audioProgress = () => (player.duration > 0 && !player.paused ? player.currentTime / player.duration : 0);

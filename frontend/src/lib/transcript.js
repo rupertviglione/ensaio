@@ -54,6 +54,28 @@ export class TranscriptBuffer {
     this.windows = [];
   }
 
+  // Block boundary: forget everything; remember the previous block's tail to drop it if it reappears (late finals).
+  clear() {
+    const prev = this.turnWords();
+    this.prevTail = prev.slice(-12).map(wordNorm).filter(Boolean);
+    this.words = [];
+    this.times = [];
+    this.text = "";
+    this.start = 0;
+    this.windows = [];
+    this.lastChange = performance.now();
+  }
+
+  dropRepeat(out) {
+    const p = this.prevTail || [];
+    const n = out.map(wordNorm);
+    for (let k = Math.min(p.length, n.length); k >= 2; k--) {
+      const tail = p.slice(-k);
+      if (tail.every((w, i) => similar(w, n[i]))) return out.slice(k);
+    }
+    return out;
+  }
+
   echoStart(ref, tailMs = 0) {
     this.windows.push({ ref, t0: performance.now(), t1: Infinity, tailMs });
   }
@@ -78,7 +100,7 @@ export class TranscriptBuffer {
       run.push(this.words[i]);
     }
     flush();
-    return out;
+    return this.dropRepeat(out);
   }
 
   lastWordAt() {

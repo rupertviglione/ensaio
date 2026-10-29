@@ -1,47 +1,55 @@
-# Requirements: Ensaio (Round 5 — vozes pt-PT, tempo real, pausas)
+# Requirements: Ensaio (Round 6 — escuta fiel e grátis, blocos, edição e navegação no ensaio)
 
-Existing app (React web /app/frontend + FastAPI /app/backend/server.py + MongoDB). See /app/memory/PRD.md for history (Rounds 1–4). This round improves the rehearsal engine.
+Existing app (React web /app/frontend + FastAPI /app/backend + MongoDB, no login, single actor). History in /app/memory/PRD.md (Rounds 1–5). Round 5 docs = phase1/. This round = phase2 + phase3.
 
 ## Core Value
-An actor rehearses a script out loud with AI scene partners that sound like natural European-Portuguese actors, reply instantly, and never cut off or misjudge the actor.
+Rehearsing with the app feels like rehearsing with a person: the actor speaks naturally, the AI partner understands faithfully (even with laptop mic + speakers), replies instantly, never flags errors that weren't made — all at zero cost for now.
 
 ## Personas & Roles
-- Actor (single user, no login): rehearses their character's lines out loud, with headphones or with speakers.
+- Actor (single user, no login), desktop browser with laptop mic and speakers (also headphones); uses both the Emergent preview link and a local copy on their computer.
 
 ## Features
 | id | feature | persona | phase |
 |---|---|---|---|
-| F-1 | AI characters speak with natural, native European-Portuguese (pt-PT) ElevenLabs voices — never Brazilian | Actor | 1 |
-| F-2 | Real-time listening of the actor via ElevenLabs Scribe v2 Realtime (streaming, word by word) | Actor | 1 |
-| F-3 | Actor's line ends by content (last words said) or by tap — never by a short silence | Actor | 1 |
-| F-4 | After X seconds of silence mid-line, the prompter gives a hint (next missing words) instead of judging an error | Actor | 1 |
-| F-5 | Mic stays always open; the start of the actor's line is never lost after the AI finishes | Actor | 1 |
-| F-6 | AI partner replies with near-zero latency after the actor's line ends (pre-generated audio, local match first) | Actor | 1 |
-| F-7 | Long lines (actor and AI) work without errors, timeouts or truncation | Actor | 1 |
-| F-8 | Works with headphones and with speakers (AI voice not mistaken for the actor) | Actor | 1 |
-| F-9 | Error handling kept as today (strictness levels grave / rigor / nunca) | Actor | 1 |
-| F-10 | Technical hardening: split server.py, remove tts_cache from git + eviction, single completion path, cached prompter audio, timeouts on LLM calls, cleanup dead code | — | 2 |
+| F-11 | Faithful real-time listening: Deepgram streaming STT (primary), Gemini Live (reserve), browser Web Speech (last resort), automatic failover | Actor | 2 |
+| F-12 | Script-aware "reasoning" matching: what sounds like the expected text counts as the expected text (phonetic/fuzzy alignment, expected words as recognition hints) | Actor | 2 |
+| F-13 | Final report counts only real errors (recognition distortions are discarded; differences confirmed before entering the report) | Actor | 2 |
+| F-14 | Consecutive lines of the actor's character (and long speeches with pauses) are one block, validated only at the end; transcript cleared between blocks (no accumulation) | Actor | 2 |
+| F-15 | Zero perceived latency: AI replies as soon as the actor's block ends; actor never waits for validation | Actor | 2 |
+| F-16 | Free pt-PT voices for the AI characters (Microsoft Edge neural pt-PT voices), OpenAI via Emergent key as reserve; ElevenLabs optional (off by default, user doesn't want to spend) | Actor | 2 |
+| F-17 | Edit a line during rehearsal: text, character attribution, mark as cut — saved permanently to the script | Actor | 3 |
+| F-18 | Tap any line in the rehearsal text → jump the rehearsal there | Actor | 3 |
+| F-19 | "Saltar" mode (toggle any time, also mid-rehearsal): skips stretches without the actor's character, playing only the cue line right before each actor line | Actor | 3 |
+| F-20 | Display: consecutive lines of the same person grouped; long lines clipped in a fixed window and revealed progressively; nav buttons fixed in place | Actor | 3 |
+| F-21 | Keyboard shortcuts for rehearsal controls (e.g. → next, ← previous, space pause), shown on screen | Actor | 3 |
+| F-22 | Script editor after auto-parse: new kinds "texto não pertencente" (page numbers, headers — ignored in rehearsal) and "cortada" (struck through, skipped); fix character / direction / content | Actor | 3 |
+| F-23 | Extra UX improvements proposed by the builder within the rehearsal flow (small, listed in the phase report) | Actor | 3 |
 
 ## Phases
-- Phase 1 → Rehearsal engine: pt-PT voices, real-time listening, content-based end of line, hints on pauses, always-open mic, long lines → F-1..F-9. [requirement](phase1/requirement.md) · [journeys](phase1/journeys.md)
-- Phase 2 → Technical hardening & cleanup → F-10.
+- Phase 2 → Listening & judging engine + free voices → F-11..F-16. [requirement](phase2/requirement.md) · [journeys](phase2/journeys.md)
+- Phase 3 → Rehearsal & script editing UX → F-17..F-23. [requirement](phase3/requirement.md) · [journeys](phase3/journeys.md)
 
 ## UI/UX Rules
-- Keep the existing UI and Portuguese (pt-PT) copy; only add what's needed (hint display, silence-hint setting, "Terminei" tap stays).
-- No visible waiting between the AI line and the actor's turn.
+- Keep the existing UI style and pt-PT copy.
+- Rehearsal controls never move; text area scrolls/clips inside a fixed frame.
+- Nothing blocks the actor's flow: no spinners between the actor's line and the AI reply.
+- Keep the character detection / text preparation pipeline as is (user says it works well).
 
 ## Integrations
-- ElevenLabs (user's own key, `ELEVENLABS_API_KEY` in backend/.env): TTS with native pt-PT voices (model: best natural multilingual model, e.g. eleven_multilingual_v2 / v3, `language_code` pt) and Scribe v2 Realtime STT (`scribe_v2_realtime`) via single-use tokens issued by backend (key never sent to browser).
-- Emergent LLM key: Claude (existing parse/summary/turn evaluation) — unchanged.
-- OpenAI TTS/STT: fallback only if ElevenLabs fails.
+- Deepgram (user's own key, free $200 credit) — streaming STT, Portuguese (pt-PT), model nova-3 (or best Portuguese streaming model), keyterm prompting with expected words; browser gets a short-lived token from backend, key never sent to browser. Env `DEEPGRAM_API_KEY`.
+- Google Gemini API (user's own free AI Studio key, new "AQ." format) — Gemini Live realtime transcription as reserve STT. Env `GEMINI_API_KEY`. Free tier limits apply.
+- Browser Web Speech API — last resort STT.
+- Microsoft Edge neural TTS (free, `edge-tts`): pt-PT voices (e.g. Raquel, Duarte, Fernanda) with pitch/rate variation to keep characters distinct — primary character + prompter voice.
+- Emergent LLM key: Claude (parse, summary, background error confirmation) unchanged; OpenAI gpt-4o-mini-tts as TTS reserve.
+- ElevenLabs: kept as optional per-character choice, off by default (no key now).
 
 ## Edge Cases
-- Long silence while remembering → hint, not error, not end of line.
-- Very long lines (> 1 min speaking, > 1000 characters).
-- Speakers: AI voice leaks into mic.
-- Actor starts speaking slightly before the AI ends.
-- ElevenLabs token/connection drops mid-line → reconnect without losing the line.
-- Key missing permissions → clear message, fallback.
+- Laptop speakers: AI voice leaking into mic must not count as the actor.
+- ASR returns near-homophones / slight distortions of the correct words.
+- Long speech with pauses, breaths, hint requests mid-block.
+- Deepgram unavailable / out of credit / network drop → Gemini → Web Speech, without losing the current block.
+- Gemini free-tier quota (429) → fall back cleanly.
+- Running locally: env keys missing → clear message in pt-PT.
 
 ## Seed Data
 - Existing demo script "A Espera" stays.
